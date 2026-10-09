@@ -1,0 +1,7 @@
+# scratch space: downloaded Wycheproof vectors, generated messages, openssl
+# keys, sabotage builds.  Repo-local on purpose -- /tmp is shared with other
+# work here and has collided before.
+scratch/
+# build products
+*.o
+ed25519
