@@ -424,6 +424,110 @@ static void fe_pow22523(fe h, const fe f) { fe_pow(h, f, FE_PM5D8, 252); }
 
 
 /* ===================================================================== *
+ * Scalars mod L, the order of the base point.
+ *
+ *   L = 2^252 + 27742317777372353535851937790883648493
+ *
+ * Two things need this: reducing a 64-byte SHA-512 digest into a scalar,
+ * and computing S = (r + k*a) mod L when signing.  Both are little-endian
+ * byte strings in and out, because that is what RFC 8032 puts on the wire;
+ * there is no limb representation here at all.
+ * ===================================================================== */
+
+static const unsigned char SC_L[32] = {
+	0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+	0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+};
+
+/* 1 iff s >= L, reading s as 32 bytes little-endian.  This is the
+ * malleability check RFC 8032 section 5.1.7 requires of a verifier: a
+ * signature carrying S + L verifies under the group equation just as well
+ * as one carrying S, so a verifier that does not refuse it hands an
+ * attacker a second valid signature for free. */
+static int sc_geq_l(const unsigned char s[32])
+{
+	for (int i = 31; i >= 0; i--)
+		if (s[i] != SC_L[i])
+			return s[i] > SC_L[i];
+	return 1;			/* exactly L, which is also >= L */
+}
+
+static void sc_sub_l(unsigned char s[32])
+{
+	int borrow = 0;
+	for (int i = 0; i < 32; i++) {
+		int v = (int)s[i] - (int)SC_L[i] - borrow;
+		borrow = v < 0;
+		s[i] = (unsigned char)(v & 0xff);
+	}
+}
+
+/* out = in mod L, in little-endian, any length.
+ *
+ * Long division, one bit at a time, from the top: r = 2r + bit, then
+ * subtract L if it fits.  r stays below L < 2^253, so 2r + 1 < 2^254 and
+ * the 32-byte accumulator never overflows -- that is the only bound this
+ * needs, and it is the reason the loop is this short.
+ *
+ * shortcut: 8*len iterations each walking 32 bytes.  About 25 us for a
+ * 64-byte digest, against the ~1 ms a signature already spends in the
+ * scalar multiplication, so it is under 3% of signing and invisible in
+ * verification.  The fast way is Barrett reduction over 21-bit limbs, which
+ * is what ref10's sc_reduce does in 200 lines of derived constants; those
+ * constants are the kind of thing that is wrong in one limb and passes
+ * every test that does not happen to carry into it.  This version has no
+ * constants beyond L itself.
+ */
+static void sc_reduce(unsigned char out[32], const unsigned char *in,
+		      size_t len)
+{
+	unsigned char r[32];
+	size_t bit;
+
+	memset(r, 0, 32);
+	for (bit = 8 * len; bit-- > 0;) {
+		unsigned c = (unsigned)(in[bit / 8] >> (bit % 8)) & 1;
+		for (int i = 0; i < 32; i++) {
+			unsigned v = (unsigned)r[i] << 1 | c;
+			r[i] = (unsigned char)v;
+			c = v >> 8;
+		}
+		if (sc_geq_l(r))
+			sc_sub_l(r);
+	}
+	memcpy(out, r, 32);
+}
+
+/* out = a*b + c mod L.  The product is formed in full at 64 bytes and then
+ * reduced, rather than reduced as it goes: 64 bytes is small, and a partial
+ * product that is "nearly reduced" is where an off-by-one lives. */
+static void sc_muladd(unsigned char out[32], const unsigned char a[32],
+		      const unsigned char b[32], const unsigned char c[32])
+{
+	uint32_t t[64];
+	unsigned char p[64];
+	unsigned carry = 0;
+	int i, j;
+
+	for (i = 0; i < 64; i++)
+		t[i] = 0;
+	for (i = 0; i < 32; i++)
+		for (j = 0; j < 32; j++)
+			t[i + j] += (uint32_t)a[i] * b[j];
+	/* Each t[k] sums at most 32 products of two bytes: under 2^21, so
+	 * nothing has overflowed and the carries can all be taken at the
+	 * end. */
+	for (i = 0; i < 64; i++) {
+		uint32_t v = t[i] + carry + (i < 32 ? c[i] : 0u);
+		p[i] = (unsigned char)(v & 0xff);
+		carry = v >> 8;
+	}
+	sc_reduce(out, p, 64);
+}
+
+/* ===================================================================== *
  * CLI.  Everything is driven through this: there is no separate C test
  * program.  `ed25519 OP ARGS...` does one operation; `ed25519 run` reads
  * one such command per line from stdin and prints one result line per
@@ -541,6 +645,42 @@ static void cmd_fe(int argc, char **argv)
 	putchar('\n');
 }
 
+/* `sc reduce X` / `sc muladd A B C` / `sc ltl S` -- scalar arithmetic mod
+ * L, again with Python's integers as the oracle. */
+static void cmd_sc(int argc, char **argv)
+{
+	static unsigned char big[64];
+	unsigned char a[32], b[32], c[32], r[32];
+	long n;
+
+	if (!strcmp(argv[1], "reduce") && argc == 3) {
+		if ((n = unhex(argv[2], big, sizeof big)) < 0) {
+			puts("ERR hex");
+			return;
+		}
+		sc_reduce(r, big, (size_t)n);
+	} else if (!strcmp(argv[1], "muladd") && argc == 5) {
+		if (!arg32(argv[2], a) || !arg32(argv[3], b) ||
+		    !arg32(argv[4], c)) {
+			puts("ERR hex");
+			return;
+		}
+		sc_muladd(r, a, b, c);
+	} else if (!strcmp(argv[1], "ltl") && argc == 3) {
+		if (!arg32(argv[2], a)) {
+			puts("ERR hex");
+			return;
+		}
+		puts(sc_geq_l(a) ? "0" : "1");
+		return;
+	} else {
+		puts("ERR sc op");
+		return;
+	}
+	puthex(r, 32);
+	putchar('\n');
+}
+
 /* One command.  Always prints exactly one line. */
 static void docmd(int argc, char **argv)
 {
@@ -549,6 +689,10 @@ static void docmd(int argc, char **argv)
 
 	if (argc < 1) {
 		puts("ERR noop");
+		return;
+	}
+	if (!strcmp(argv[0], "sc") && argc >= 3) {
+		cmd_sc(argc, argv);
 		return;
 	}
 	if (!strcmp(argv[0], "fe") && argc >= 3) {

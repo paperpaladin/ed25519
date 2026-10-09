@@ -162,9 +162,76 @@ def sec_fe(exe):
     ok(True, "fe: %d operations differenced in one process" % len(cmds))
 
 
+# ------------------------------------------------------------------ sc ---
+def sec_sc(exe):
+    """Scalars mod L against Python's integers.
+
+    The interesting inputs are L itself and its small multiples, because a
+    reduction that is one conditional subtraction short gets every random
+    input right and L+1 wrong -- and L+1 is precisely what the Wycheproof
+    malleability cases put in a signature.
+    """
+    rnd = random.Random(3)
+    edge = [0, 1, 2, L - 2, L - 1, L, L + 1, L + 2,
+            2 * L, 2 * L + 1, 4 * L, 8 * L, 2**252, 2**253, 2**255,
+            2**255 - 19, 2**256 - 1, 2**512 - 1, 2**256]
+    small = [v % 2**256 for v in edge]
+    wide = edge + [rnd.randrange(2**512) for _ in range(1500)] \
+        + [rnd.randrange(2**256) for _ in range(500)] \
+        + [k * L + rnd.randrange(3) for k in range(1, 40)]
+
+    cmds, want, names = [], [], []
+
+    def one(c, w, nm):
+        cmds.append(c)
+        want.append(w)
+        names.append(nm)
+
+    for v in wide:
+        b = (v % 2**512).to_bytes(64, "little")
+        one("sc reduce " + b.hex(), ((v % 2**512) % L).to_bytes(32, "little").hex(),
+            "reduce64")
+    for v in small:
+        b = (v % 2**256).to_bytes(32, "little")
+        one("sc reduce " + b.hex(), ((v % 2**256) % L).to_bytes(32, "little").hex(),
+            "reduce32")
+        one("sc ltl " + b.hex(), "1" if (v % 2**256) < L else "0", "ltl")
+    for v in [rnd.randrange(2**256) for _ in range(400)] + small:
+        b = (v % 2**256).to_bytes(32, "little")
+        one("sc ltl " + b.hex(), "1" if (v % 2**256) < L else "0", "ltl")
+    tri = [(rnd.randrange(2**256), rnd.randrange(2**256), rnd.randrange(2**256))
+           for _ in range(800)]
+    tri += [(L - 1, L - 1, L - 1), (L, L, L), (0, 0, 0), (1, 1, 0),
+            (2**256 - 1, 2**256 - 1, 2**256 - 1)]
+    for a, b, c in tri:
+        one("sc muladd %s %s %s" % (leb(a).hex(), leb(b).hex(), leb(c).hex()),
+            ((a * b + c) % L).to_bytes(32, "little").hex(), "muladd")
+
+    got = batch(exe, cmds)
+    bad = {}
+    for i, g in enumerate(got):
+        if g != want[i]:
+            bad.setdefault(names[i], []).append(i)
+    for nm in ("reduce64", "reduce32", "ltl", "muladd"):
+        tot = sum(1 for x in names if x == nm)
+        b = bad.get(nm, [])
+        msg = "sc %-9s == Python integers mod L on %d inputs" % (nm, tot)
+        if b:
+            msg += " (first bad: `%s` -> %s, want %s)" % (
+                cmds[b[0]], got[b[0]], want[b[0]])
+        ok(not b, msg)
+    # The one check that needs no reference at all: L is the order, so
+    # anything times L is zero and L reduces to zero.
+    z = "0" * 64
+    g = batch(exe, ["sc reduce " + leb(L).hex(),
+                    "sc muladd %s %s %s" % (leb(L).hex(), leb(1).hex(), z)])
+    ok(g[0] == z and g[1] == z, "L reduces to 0 and L*1 reduces to 0")
+
+
 SECTIONS = {
     "sha512": sec_sha512,
     "fe": sec_fe,
+    "sc": sec_sc,
 }
 
 
