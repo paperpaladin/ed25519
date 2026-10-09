@@ -183,6 +183,247 @@ void ed25519_sha512(const void *data, size_t len, unsigned char out[64])
 }
 
 /* ===================================================================== *
+ * Field arithmetic mod p = 2^255 - 19.
+ *
+ * Five 64-bit limbs in radix 2^51, little-endian: the value is
+ * f[0] + f[1]*2^51 + ... + f[4]*2^204.  The representation is redundant --
+ * a field element has many limb encodings -- and the invariant maintained
+ * everywhere below is that every limb is < 2^51 + 2^13 on entry to and exit
+ * from every operation.  That bound is what makes the products fit:
+ * (2^51+2^13)^2 * 19 * 5 < 2^109, well inside an unsigned __int128, and the
+ * final carry 19*(t4 >> 51) < 2^62 fits a uint64_t.  fe_add and fe_sub
+ * carry on the way out rather than leaving slack for a later operation to
+ * absorb, which costs a few instructions and removes the whole class of
+ * "limb grew too big three operations ago" bug.
+ *
+ * ../bigint next door does arbitrary-precision integers; none of it is
+ * reusable here.  This is fixed-width arithmetic in a single modulus whose
+ * shape (2^255 - 19, so 2^255 == 19) is the entire reason the code looks
+ * like this.  Sharing a general bignum would have been slower and would
+ * have had nothing to say about the carry bounds above.
+ * ===================================================================== */
+
+__extension__ typedef unsigned __int128 fe_u128;	/* -Wpedantic */
+
+typedef uint64_t fe[5];
+
+#define MASK51 0x7ffffffffffffull
+
+/* p - 2 and (p - 5)/8, little-endian, as exponents for fe_pow. */
+static const unsigned char FE_PM2[32] = {
+	0xeb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+};
+static const unsigned char FE_PM5D8[32] = {
+	0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f,
+};
+
+static void fe_0(fe h) { h[0] = h[1] = h[2] = h[3] = h[4] = 0; }
+static void fe_1(fe h) { fe_0(h); h[0] = 1; }
+static void fe_copy(fe h, const fe f) { memcpy(h, f, 5 * sizeof *h); }
+
+/* One carry pass, wrap first.  Taking 2^255 == 19 before the chain rather
+ * than after is what makes two passes provably enough to get every limb
+ * strictly below 2^51: after this, limbs 0..3 are masked and only limb 4
+ * can have grown, and by at most 1. */
+static void fe_carry_pass(fe h)
+{
+	uint64_t c;
+	c = h[4] >> 51; h[4] &= MASK51; h[0] += 19 * c;
+	c = h[0] >> 51; h[0] &= MASK51; h[1] += c;
+	c = h[1] >> 51; h[1] &= MASK51; h[2] += c;
+	c = h[2] >> 51; h[2] &= MASK51; h[3] += c;
+	c = h[3] >> 51; h[3] &= MASK51; h[4] += c;
+}
+
+static void fe_add(fe h, const fe f, const fe g)
+{
+	for (int i = 0; i < 5; i++)
+		h[i] = f[i] + g[i];
+	fe_carry_pass(h);
+}
+
+static void fe_sub(fe h, const fe f, const fe g)
+{
+	/* 2p, so the subtraction cannot go negative: g's limbs are below
+	 * 2^51 + 2^13 and every limb of 2p is above that. */
+	static const uint64_t twop[5] = {
+		0xfffffffffffdaull, 0xffffffffffffeull, 0xffffffffffffeull,
+		0xffffffffffffeull, 0xffffffffffffeull,
+	};
+	for (int i = 0; i < 5; i++)
+		h[i] = f[i] + twop[i] - g[i];
+	fe_carry_pass(h);
+}
+
+static void fe_neg(fe h, const fe f)
+{
+	fe z;
+	fe_0(z);
+	fe_sub(h, z, f);
+}
+
+static void fe_mul(fe h, const fe f, const fe g)
+{
+	fe_u128 t[5] = { 0, 0, 0, 0, 0 };
+	uint64_t c = 0;
+	int i, j;
+
+	/* Schoolbook, with the top half folded down by 2^255 == 19.  Written
+	 * as a loop rather than the usual 25 unrolled lines: gcc unrolls it
+	 * anyway, and the unrolled form is where a transposed index hides.
+	 * shortcut: no Karatsuba, no dedicated squaring -- fe_sq below just
+	 * calls this.  A squaring that exploits the symmetry is about 30%
+	 * fewer multiplies, which matters only if signing speed does. */
+	for (i = 0; i < 5; i++)
+		for (j = 0; j < 5; j++) {
+			fe_u128 pr = (fe_u128)f[i] * g[j];
+			if (i + j >= 5)
+				t[i + j - 5] += 19 * pr;
+			else
+				t[i + j] += pr;
+		}
+	for (i = 0; i < 5; i++) {
+		t[i] += c;
+		h[i] = (uint64_t)t[i] & MASK51;
+		c = (uint64_t)(t[i] >> 51);
+	}
+	h[0] += 19 * c;
+	c = h[0] >> 51; h[0] &= MASK51; h[1] += c;
+	c = h[1] >> 51; h[1] &= MASK51; h[2] += c;
+}
+
+static void fe_sq(fe h, const fe f) { fe_mul(h, f, f); }
+
+static void fe_muls(fe h, const fe f, uint64_t s)
+{
+	fe c;
+	fe_0(c);
+	c[0] = s;
+	fe_mul(h, f, c);
+}
+
+/* Canonical 32-byte little-endian encoding: the unique representative in
+ * [0, p). */
+static void fe_tobytes(unsigned char s[32], const fe f)
+{
+	fe t;
+	uint64_t c, q;
+	int i, j;
+
+	fe_copy(t, f);
+	fe_carry_pass(t);
+	fe_carry_pass(t);	/* now every limb < 2^51, so t < 2^255 */
+
+	/* q = 1 iff t + 19 >= 2^255, i.e. iff t >= p.  Then subtract p by
+	 * adding 19 and dropping bit 255. */
+	q = (t[0] + 19) >> 51;
+	q = (t[1] + q) >> 51;
+	q = (t[2] + q) >> 51;
+	q = (t[3] + q) >> 51;
+	q = (t[4] + q) >> 51;
+	t[0] += 19 * q;
+	c = t[0] >> 51; t[0] &= MASK51; t[1] += c;
+	c = t[1] >> 51; t[1] &= MASK51; t[2] += c;
+	c = t[2] >> 51; t[2] &= MASK51; t[3] += c;
+	c = t[3] >> 51; t[3] &= MASK51; t[4] += c;
+	t[4] &= MASK51;
+
+	/* shortcut: a bit at a time, 256 iterations of nothing.  Five shifts
+	 * and masks would do it, and that is exactly where an off-by-one in
+	 * a limb boundary hides; this version has no boundaries to get
+	 * wrong.  Not on any hot path -- it runs twice per signature. */
+	for (i = 0; i < 32; i++) {
+		unsigned v = 0;
+		for (j = 0; j < 8; j++) {
+			int bit = 8 * i + j;
+			if (bit < 255)
+				v |= (unsigned)((t[bit / 51] >> (bit % 51)) & 1)
+				     << j;
+		}
+		s[i] = (unsigned char)v;
+	}
+}
+
+/* Decode 32 bytes little-endian, ignoring bit 255 as RFC 7748 and RFC 8032
+ * both require.  A non-canonical input (>= p) decodes to its own value mod
+ * p without complaint; callers that must reject one re-encode and compare,
+ * which is what fe_iscanon does. */
+static void fe_frombytes(fe h, const unsigned char s[32])
+{
+	fe_0(h);
+	for (int bit = 0; bit < 255; bit++)
+		if ((s[bit / 8] >> (bit % 8)) & 1)
+			h[bit / 51] |= (uint64_t)1 << (bit % 51);
+}
+
+static int fe_iscanon(const unsigned char s[32])
+{
+	unsigned char r[32];
+	fe t;
+	fe_frombytes(t, s);
+	fe_tobytes(r, t);
+	return memcmp(r, s, 32) == 0;
+}
+
+static int fe_isnonzero(const fe f)
+{
+	unsigned char s[32];
+	unsigned char acc = 0;
+	fe_tobytes(s, f);
+	for (int i = 0; i < 32; i++)
+		acc |= s[i];
+	return acc != 0;
+}
+
+static int fe_isnegative(const fe f)
+{
+	unsigned char s[32];
+	fe_tobytes(s, f);
+	return s[0] & 1;
+}
+
+static int fe_eq(const fe f, const fe g)
+{
+	unsigned char a[32], b[32];
+	fe_tobytes(a, f);
+	fe_tobytes(b, g);
+	return memcmp(a, b, 32) == 0;
+}
+
+/* h = f^e, e little-endian over nbits bits, square and multiply from the
+ * top.  shortcut: the textbook ladder, 254 squarings and 254 conditional
+ * multiplies for an inversion where the standard addition chain uses 254
+ * squarings and 11 multiplies.  It is also, and this is the reason, the
+ * version whose correctness is obvious by inspection; the exponent is a
+ * constant in the table above and is checked against p - 2 in Python. */
+static void fe_pow(fe h, const fe f, const unsigned char *e, int nbits)
+{
+	fe r, b;
+	fe_1(r);
+	fe_copy(b, f);
+	for (int i = nbits - 1; i >= 0; i--) {
+		fe_sq(r, r);
+		if ((e[i / 8] >> (i % 8)) & 1)
+			fe_mul(r, r, b);
+	}
+	fe_copy(h, r);
+}
+
+static void fe_invert(fe h, const fe f) { fe_pow(h, f, FE_PM2, 255); }
+
+/* f^((p-5)/8), the exponent RFC 8032 section 5.1.1 uses to build a square
+ * root: for p == 5 mod 8, if x is a square then x^((p-5)/8) * x is a square
+ * root of x up to a factor of sqrt(-1). */
+static void fe_pow22523(fe h, const fe f) { fe_pow(h, f, FE_PM5D8, 252); }
+
+
+/* ===================================================================== *
  * CLI.  Everything is driven through this: there is no separate C test
  * program.  `ed25519 OP ARGS...` does one operation; `ed25519 run` reads
  * one such command per line from stdin and prints one result line per
@@ -231,6 +472,75 @@ static void puthex(const unsigned char *p, size_t n)
 	}
 }
 
+static int arg32(const char *s, unsigned char out[32])
+{
+	return unhex(s, out, 32) == 32;
+}
+
+/* `fe OP A [B]` -- one field operation on canonical 32-byte little-endian
+ * hex, printing the canonical encoding of the result, or 0/1 for the
+ * predicates.  This is the whole surface t/diff.py needs to difference the
+ * field against Python's integers, which is the cheapest oracle in the
+ * repo: Python has arbitrary precision and `% (2**255 - 19)`. */
+static void cmd_fe(int argc, char **argv)
+{
+	unsigned char ab[32], bb[32], rb[32];
+	fe x, y, r;
+	const char *op = argv[1];
+
+	if (!arg32(argv[2], ab)) {
+		puts("ERR hex");
+		return;
+	}
+	fe_frombytes(x, ab);
+	if (!strcmp(op, "muls") && argc == 4) {
+		fe_muls(r, x, strtoull(argv[3], NULL, 10));
+		fe_tobytes(rb, r);
+		puthex(rb, 32);
+		putchar('\n');
+		return;
+	}
+	fe_0(y);
+	if (argc >= 4) {
+		if (!arg32(argv[3], bb)) {
+			puts("ERR hex");
+			return;
+		}
+		fe_frombytes(y, bb);
+	}
+	if (!strcmp(op, "iscanon")) {
+		puts(fe_iscanon(ab) ? "1" : "0");
+		return;
+	}
+	if (!strcmp(op, "isneg")) {
+		puts(fe_isnegative(x) ? "1" : "0");
+		return;
+	}
+	if (!strcmp(op, "nonzero")) {
+		puts(fe_isnonzero(x) ? "1" : "0");
+		return;
+	}
+	if (!strcmp(op, "eq")) {
+		puts(fe_eq(x, y) ? "1" : "0");
+		return;
+	}
+	if (!strcmp(op, "add"))		 fe_add(r, x, y);
+	else if (!strcmp(op, "sub"))	 fe_sub(r, x, y);
+	else if (!strcmp(op, "mul"))	 fe_mul(r, x, y);
+	else if (!strcmp(op, "sq"))	 fe_sq(r, x);
+	else if (!strcmp(op, "neg"))	 fe_neg(r, x);
+	else if (!strcmp(op, "inv"))	 fe_invert(r, x);
+	else if (!strcmp(op, "p22523"))	 fe_pow22523(r, x);
+	else if (!strcmp(op, "canon"))	 fe_copy(r, x);
+	else {
+		puts("ERR fe op");
+		return;
+	}
+	fe_tobytes(rb, r);
+	puthex(rb, 32);
+	putchar('\n');
+}
+
 /* One command.  Always prints exactly one line. */
 static void docmd(int argc, char **argv)
 {
@@ -239,6 +549,10 @@ static void docmd(int argc, char **argv)
 
 	if (argc < 1) {
 		puts("ERR noop");
+		return;
+	}
+	if (!strcmp(argv[0], "fe") && argc >= 3) {
+		cmd_fe(argc, argv);
 		return;
 	}
 	if (!strcmp(argv[0], "sha512") && argc == 2) {

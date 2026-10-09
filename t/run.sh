@@ -40,8 +40,12 @@ run() {
 printf -- '--- oracle: CPython hashlib (the vendored SHA-512)\n'
 run "diff.py sha512" python3 t/diff.py "$E" sha512
 
+printf -- '\n--- oracle: Python integers mod 2^255-19 (the field)\n'
+run "diff.py fe" python3 t/diff.py "$E" fe
+
 printf -- '\n=== oracles\n'
 printf -- '  CPython hashlib               ran (no network needed)\n'
+printf -- '  Python integers mod p         ran (no network needed)\n'
 
 pass=$(grep -c '^ok - ' "$OUT")
 fail=$(grep -c '^not ok - ' "$OUT")
