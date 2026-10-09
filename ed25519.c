@@ -528,6 +528,217 @@ static void sc_muladd(unsigned char out[32], const unsigned char a[32],
 }
 
 /* ===================================================================== *
+ * The twisted Edwards group: -x^2 + y^2 = 1 + d*x^2*y^2 over GF(p).
+ *
+ * Points are kept in extended coordinates (X:Y:Z:T) with x = X/Z,
+ * y = Y/Z and x*y = T/Z, which is what makes the addition formula below
+ * inversion-free.
+ *
+ * No curve constant is typed in.  d is -121665/121666 by definition,
+ * sqrt(-1) is 2^((p-1)/4), and the base point is the decoding of y = 4/5
+ * with a clear sign bit -- all four are computed at startup from
+ * fe_invert and fe_pow, so there is no 77-digit decimal literal anywhere
+ * in this file to mistype.  t/diff.py then checks the derived values
+ * against the ones printed in RFC 8032 section 5.1, which is an oracle for
+ * the constants that is independent of any signature vector.
+ * ===================================================================== */
+
+struct ge { fe X, Y, Z, T; };
+
+static fe GE_D, GE_D2, GE_SQRTM1;
+static struct ge GE_B;
+static int ge_ready;
+
+static void ge_identity(struct ge *p)
+{
+	fe_0(p->X);
+	fe_1(p->Y);
+	fe_1(p->Z);
+	fe_0(p->T);
+}
+
+/* RFC 8032 section 5.1.4, the unified formula from Hisil-Wong-Carter-Dawson
+ * section 3.1.  It is valid for every pair of points on the curve, the
+ * neutral element included, and for p == q -- which is why there is no
+ * separate doubling routine: ge_add(r, p, p) is the doubling, and the
+ * differential against the Python reference checks that claim rather than
+ * taking it on trust.
+ *
+ * r may alias p or q: everything is read into locals before the four
+ * products that write r.
+ *
+ * shortcut: a dedicated doubling saves roughly a third of the field
+ * multiplications in a scalar multiplication (9M -> 4M+4S).  Signing is
+ * about 1 ms here and nothing in this repo needs it faster. */
+static void ge_add(struct ge *r, const struct ge *p, const struct ge *q)
+{
+	fe a, b, c, d, e, f, g, h, t;
+
+	fe_sub(t, p->Y, p->X);
+	fe_sub(a, q->Y, q->X);
+	fe_mul(a, t, a);			/* A = (Y1-X1)(Y2-X2) */
+	fe_add(t, p->Y, p->X);
+	fe_add(b, q->Y, q->X);
+	fe_mul(b, t, b);			/* B = (Y1+X1)(Y2+X2) */
+	fe_mul(c, p->T, q->T);
+	fe_mul(c, c, GE_D2);			/* C = T1*2d*T2 */
+	fe_mul(d, p->Z, q->Z);
+	fe_add(d, d, d);			/* D = 2*Z1*Z2 */
+	fe_sub(e, b, a);
+	fe_sub(f, d, c);
+	fe_add(g, d, c);
+	fe_add(h, b, a);
+	fe_mul(r->X, e, f);
+	fe_mul(r->Y, g, h);
+	fe_mul(r->Z, f, g);
+	fe_mul(r->T, e, h);
+}
+
+static void ge_neg(struct ge *r, const struct ge *p)
+{
+	fe_neg(r->X, p->X);
+	fe_copy(r->Y, p->Y);
+	fe_copy(r->Z, p->Z);
+	fe_neg(r->T, p->T);
+}
+
+static int ge_isidentity(const struct ge *p)
+{
+	return !fe_isnonzero(p->X) && fe_eq(p->Y, p->Z);
+}
+
+static void ge_tobytes(unsigned char s[32], const struct ge *p)
+{
+	fe zi, x, y;
+
+	fe_invert(zi, p->Z);
+	fe_mul(x, p->X, zi);
+	fe_mul(y, p->Y, zi);
+	fe_tobytes(s, y);
+	s[31] = (unsigned char)(s[31] | fe_isnegative(x) << 7);
+}
+
+/* RFC 8032 section 5.1.3.  Returns 0 on success, -1 if the 32 bytes are not
+ * the encoding of any point.  Three ways to fail, all of them tested:
+ *
+ *  - y is not canonical, i.e. the low 255 bits encode a value >= p.  The
+ *    RFC says decoding "fails" for these and they are the non-canonical
+ *    encodings the negative tests feed in.
+ *  - (y^2-1)/(d*y^2+1) is not a square, so no x exists and the point is
+ *    not on the curve.
+ *  - x comes out zero and the sign bit is set, which is a second encoding
+ *    of a point that already has one.  Wycheproof test 151 is exactly this
+ *    case: y = 1 with the sign bit set.
+ */
+static int ge_frombytes(struct ge *p, const unsigned char s[32])
+{
+	fe one, u, v, v3, x, y, vxx, check;
+	unsigned char ys[32];
+	int sign = s[31] >> 7;
+
+	memcpy(ys, s, 32);
+	ys[31] &= 0x7f;
+	if (!fe_iscanon(ys))
+		return -1;
+	fe_frombytes(y, ys);
+
+	fe_1(one);
+	fe_sq(u, y);
+	fe_mul(v, u, GE_D);
+	fe_sub(u, u, one);			/* u = y^2 - 1 */
+	fe_add(v, v, one);			/* v = d*y^2 + 1 */
+
+	/* x = u*v^3 * (u*v^7)^((p-5)/8) is a square root of u/v whenever one
+	 * exists, up to a factor of sqrt(-1). */
+	fe_sq(v3, v);
+	fe_mul(v3, v3, v);
+	fe_sq(x, v3);
+	fe_mul(x, x, v);
+	fe_mul(x, x, u);			/* u*v^7 */
+	fe_pow22523(x, x);
+	fe_mul(x, x, v3);
+	fe_mul(x, x, u);
+
+	fe_sq(vxx, x);
+	fe_mul(vxx, vxx, v);
+	fe_sub(check, vxx, u);
+	if (fe_isnonzero(check)) {
+		fe_add(check, vxx, u);
+		if (fe_isnonzero(check))
+			return -1;		/* u/v is not a square */
+		fe_mul(x, x, GE_SQRTM1);
+	}
+	if (!fe_isnonzero(x) && sign)
+		return -1;
+	if (fe_isnegative(x) != sign)
+		fe_neg(x, x);
+
+	fe_copy(p->X, x);
+	fe_copy(p->Y, y);
+	fe_1(p->Z);
+	fe_mul(p->T, x, y);
+	return 0;
+}
+
+/* Derive d, 2d, sqrt(-1) and the base point from their definitions.
+ *
+ * shortcut: a lazily initialised global, so this is not thread-safe on the
+ * first call and not re-entrant.  The upgrade path is a caller-supplied
+ * context, or making the four constants static initialisers full of digits
+ * -- which is the thing this exists to avoid.  Document rather than
+ * pretend: call any entry point once before going multi-threaded. */
+static void ge_init(void)
+{
+	fe t, num, den, by;
+	unsigned char enc[32];
+
+	if (ge_ready)
+		return;
+	/* d = -121665 / 121666 */
+	fe_0(num);
+	num[0] = 121665;
+	fe_neg(num, num);
+	fe_0(den);
+	den[0] = 121666;
+	fe_invert(den, den);
+	fe_mul(GE_D, num, den);
+	fe_add(GE_D2, GE_D, GE_D);
+
+	/* sqrt(-1) = 2^((p-1)/4), which exists because p == 1 mod 4.  It is
+	 * the factor the square root in ge_frombytes may be off by. */
+	fe_0(t);
+	t[0] = 2;
+	{
+		/* (p-1)/4 = 2^253 - 5, little-endian */
+		static const unsigned char e[32] = {
+			0xfb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f,
+		};
+		fe_pow(GE_SQRTM1, t, e, 253);
+	}
+
+	/* The base point: y = 4/5, x the root with a clear low bit, which is
+	 * what RFC 8032 section 5.1 specifies. */
+	ge_ready = 1;		/* ge_frombytes needs D and SQRTM1, now set */
+	fe_0(by);
+	by[0] = 4;
+	fe_0(t);
+	t[0] = 5;
+	fe_invert(t, t);
+	fe_mul(by, by, t);
+	fe_tobytes(enc, by);
+	enc[31] &= 0x7f;
+	if (ge_frombytes(&GE_B, enc) != 0) {
+		/* Unreachable: 4/5 is on the curve.  If it ever fires, the
+		 * field arithmetic is broken and every vector will say so. */
+		ge_identity(&GE_B);
+		ge_ready = 0;
+	}
+}
+
+/* ===================================================================== *
  * CLI.  Everything is driven through this: there is no separate C test
  * program.  `ed25519 OP ARGS...` does one operation; `ed25519 run` reads
  * one such command per line from stdin and prints one result line per
@@ -681,6 +892,92 @@ static void cmd_sc(int argc, char **argv)
 	putchar('\n');
 }
 
+/* `ge ...` -- the group, on 32-byte point encodings, so the Python
+ * reference can difference it without knowing anything about extended
+ * coordinates.  "ERR dec" means the input is not the encoding of a point,
+ * which is itself one of the answers under test. */
+static void cmd_ge(int argc, char **argv)
+{
+	unsigned char pb[32], qb[32], rb[32];
+	struct ge p, q, r;
+	const char *op = argv[1];
+
+	ge_init();
+	if (!strcmp(op, "const") && argc == 3) {
+		if (!strcmp(argv[2], "d"))		fe_tobytes(rb, GE_D);
+		else if (!strcmp(argv[2], "d2"))	fe_tobytes(rb, GE_D2);
+		else if (!strcmp(argv[2], "sqrtm1"))	fe_tobytes(rb, GE_SQRTM1);
+		else if (!strcmp(argv[2], "l"))		memcpy(rb, SC_L, 32);
+		else if (!strcmp(argv[2], "basex")) {
+			fe zi, x;
+			fe_invert(zi, GE_B.Z);
+			fe_mul(x, GE_B.X, zi);
+			fe_tobytes(rb, x);
+		} else if (!strcmp(argv[2], "basey")) {
+			fe zi, y;
+			fe_invert(zi, GE_B.Z);
+			fe_mul(y, GE_B.Y, zi);
+			fe_tobytes(rb, y);
+		} else if (!strcmp(argv[2], "base")) {
+			ge_tobytes(rb, &GE_B);
+		} else {
+			puts("ERR const");
+			return;
+		}
+		puthex(rb, 32);
+		putchar('\n');
+		return;
+	}
+	if (!arg32(argv[2], pb)) {
+		puts("ERR hex");
+		return;
+	}
+	if (ge_frombytes(&p, pb) != 0) {
+		puts("ERR dec");
+		return;
+	}
+	if (!strcmp(op, "dec")) {
+		/* Round trip: decoding then encoding must be the identity on
+		 * every valid encoding. */
+		ge_tobytes(rb, &p);
+		puthex(rb, 32);
+		putchar('\n');
+		return;
+	}
+	if (!strcmp(op, "id")) {
+		puts(ge_isidentity(&p) ? "1" : "0");
+		return;
+	}
+	if (!strcmp(op, "neg")) {
+		ge_neg(&r, &p);
+	} else if (!strcmp(op, "dbl")) {
+		ge_add(&r, &p, &p);
+	} else if (!strcmp(op, "add") && argc == 4) {
+		if (!arg32(argv[3], qb)) {
+			puts("ERR hex");
+			return;
+		}
+		if (ge_frombytes(&q, qb) != 0) {
+			puts("ERR dec2");
+			return;
+		}
+		ge_add(&r, &p, &q);
+	} else if (!strcmp(op, "selfadd")) {
+		/* r = p + p through the aliasing path: r, p and q all one
+		 * object.  Tested separately because a formula that reads a
+		 * coordinate after writing it would pass `dbl` and fail
+		 * here. */
+		r = p;
+		ge_add(&r, &r, &r);
+	} else {
+		puts("ERR ge op");
+		return;
+	}
+	ge_tobytes(rb, &r);
+	puthex(rb, 32);
+	putchar('\n');
+}
+
 /* One command.  Always prints exactly one line. */
 static void docmd(int argc, char **argv)
 {
@@ -689,6 +986,10 @@ static void docmd(int argc, char **argv)
 
 	if (argc < 1) {
 		puts("ERR noop");
+		return;
+	}
+	if (!strcmp(argv[0], "ge") && argc >= 3) {
+		cmd_ge(argc, argv);
 		return;
 	}
 	if (!strcmp(argv[0], "sc") && argc >= 3) {

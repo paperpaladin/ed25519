@@ -228,10 +228,174 @@ def sec_sc(exe):
     ok(g[0] == z and g[1] == z, "L reduces to 0 and L*1 reduces to 0")
 
 
+# ----------------------------------------------- a reference in Python ---
+# An independent Ed25519, about forty lines, written from the formulas in
+# RFC 8032 sections 5.1.3 and 5.1.4 and using Python's integers for the
+# field.  It shares no code and no representation with ed25519.c: no limbs,
+# no radix, no carry bounds, a different square-root path.  That makes it a
+# real second opinion on the group law rather than a restatement of the C.
+D = -121665 * pow(121666, P - 2, P) % P
+SQRTM1 = pow(2, (P - 1) // 4, P)
+BY = 4 * pow(5, P - 2, P) % P
+
+
+def ref_add(a, b):
+    x1, y1, z1, t1 = a
+    x2, y2, z2, t2 = b
+    aa = (y1 - x1) * (y2 - x2) % P
+    bb = (y1 + x1) * (y2 + x2) % P
+    cc = 2 * D * t1 * t2 % P
+    dd = 2 * z1 * z2 % P
+    e, f, g, h = bb - aa, dd - cc, dd + cc, bb + aa
+    return (e * f % P, g * h % P, f * g % P, e * h % P)
+
+
+def ref_mul(s, pt):
+    r = (0, 1, 1, 0)
+    for i in range(255, -1, -1):
+        r = ref_add(r, r)
+        if (s >> i) & 1:
+            r = ref_add(r, pt)
+    return r
+
+
+def ref_encode(pt):
+    x, y, z, _ = pt
+    zi = pow(z, P - 2, P)
+    x, y = x * zi % P, y * zi % P
+    return leb(y | (x & 1) << 255)
+
+
+def ref_decode(b):
+    """None if these 32 bytes are not the encoding of a point."""
+    y = le(b) % 2**255
+    sign = b[31] >> 7
+    if y >= P:
+        return None
+    u, v = (y * y - 1) % P, (D * y * y + 1) % P
+    x = u * pow(v, 3, P) % P * pow(u * pow(v, 7, P) % P, (P - 5) // 8, P) % P
+    if v * x * x % P != u % P:
+        x = x * SQRTM1 % P
+        if v * x * x % P != u % P:
+            return None
+    if x == 0 and sign:
+        return None
+    if x & 1 != sign:
+        x = P - x
+    return (x, y, 1, x * y % P)
+
+
+REF_B = ref_decode(ref_encode((0, BY, 1, 0)))
+
+
+def ref_scalar_base(s):
+    return ref_encode(ref_mul(s % (2**256), REF_B))
+
+
+# ------------------------------------------------------------------ ge ---
+def ref_points(n, seed):
+    """n distinct curve points, as encodings, from the Python reference."""
+    rnd = random.Random(seed)
+    out = []
+    while len(out) < n:
+        b = leb(rnd.randrange(2**256))
+        if ref_decode(b) is not None:
+            out.append(b)
+    return out
+
+
+def sec_ge(exe):
+    # The curve constants against RFC 8032 section 5.1, which prints them.
+    want = {
+        "d": 37095705934669439343138083508754565189542113879843219016388785533085940283555,
+        "sqrtm1": 19681161376707505956807079304988542015446066515923890162744021073123829784752,
+        "basex": 15112221349535400772501151409588531511454012693041857206046113283949847762202,
+        "basey": 46316835694926478169428394003475163141307993866256225615783033603165251855960,
+        "l": 2**252 + 27742317777372353535851937790883648493,
+    }
+    names = sorted(want)
+    got = batch(exe, ["ge const " + n for n in names])
+    bad = [n for n, g in zip(names, got)
+           if le(bytes.fromhex(g)) != want[n] % 2**256]
+    ok(not bad, "curve constants derived from their definitions equal the "
+       "values printed in RFC 8032 5.1 (d, sqrt(-1), Bx, By, L): %s"
+       % (", ".join(bad) + " differ" if bad else "all 5 match"))
+    g = batch(exe, ["ge const base"])
+    ok(g[0] == "5866666666666666666666666666666666666666666666666666666666666666",
+       "the base point encodes to RFC 8032's 5866...66")
+
+    pts = ref_points(300, 4)
+    # The 8 points of order dividing 8, and the two encodings of the
+    # identity-adjacent y values; these are the inputs where a formula that
+    # is merely "unified for distinct points" falls over.
+    special = [leb(0), leb(1), leb(1 | 1 << 255), leb(P - 1), leb(P),
+               leb(2**255 - 1),
+               bytes.fromhex("0000000000000000000000000000000000000000"
+                             "000000000000000000000080"),
+               bytes.fromhex("ecffffffffffffffffffffffffffffffffffffff"
+                             "ffffffffffffffffffffff7f"),
+               bytes.fromhex("26e8958fc2b227b045c3f489f2ef98f0d5dfac05"
+                             "d3c63339b13802886d53fc05"),
+               bytes.fromhex("c7176a703d4dd84fba3c0b760d10670f2a2053fa"
+                             "2c39ccc64ec7fd7792ac037a")]
+    allpts = special + pts
+
+    cmds, want2 = [], []
+
+    def one(c, w):
+        cmds.append(c)
+        want2.append(w)
+
+    nvalid = 0
+    for b in allpts:
+        r = ref_decode(b)
+        if r is None:
+            one("ge dec " + b.hex(), "ERR dec")
+            continue
+        nvalid += 1
+        one("ge dec " + b.hex(), ref_encode(r).hex())
+        one("ge neg " + b.hex(),
+            ref_encode((P - r[0], r[1], 1, (P - r[0]) * r[1] % P)).hex())
+        one("ge dbl " + b.hex(), ref_encode(ref_add(r, r)).hex())
+        one("ge selfadd " + b.hex(), ref_encode(ref_add(r, r)).hex())
+        one("ge id " + b.hex(), "1" if r[0] == 0 and r[1] == 1 else "0")
+    for i, b in enumerate(allpts):
+        c = allpts[(i * 13 + 5) % len(allpts)]
+        rb, rc = ref_decode(b), ref_decode(c)
+        if rb is None:
+            one("ge add %s %s" % (b.hex(), c.hex()), "ERR dec")
+        elif rc is None:
+            one("ge add %s %s" % (b.hex(), c.hex()), "ERR dec2")
+        else:
+            one("ge add %s %s" % (b.hex(), c.hex()),
+                ref_encode(ref_add(rb, rc)).hex())
+
+    got = batch(exe, cmds)
+    bad = [i for i in range(len(cmds)) if got[i] != want2[i]]
+    msg = ("group law == the Python reference on %d operations over %d "
+           "points (%d of the encodings are not points and must say so)"
+           % (len(cmds), nvalid, len(allpts) - nvalid))
+    if bad:
+        msg += " -- first bad: `%s` -> %s, want %s" % (
+            cmds[bad[0]], got[bad[0]], want2[bad[0]])
+    ok(not bad, msg)
+
+    # The non-canonical y values are exactly y in [p, 2^255): nineteen of
+    # them, each with either sign bit.  y = p is the worst one, because it
+    # is p + 0 and y = 0 is a real point of order 4 -- so a verifier that
+    # reduces mod p instead of refusing gets a point out of it.
+    nc = [leb((P + k) | sb << 255) for k in range(19) for sb in (0, 1)]
+    got = batch(exe, ["ge dec " + b.hex() for b in nc])
+    n = sum(1 for g in got if g == "ERR dec")
+    ok(n == len(nc), "every non-canonical y in [p, 2^255) rejected, both "
+       "sign bits: %d/%d" % (n, len(nc)))
+
+
 SECTIONS = {
     "sha512": sec_sha512,
     "fe": sec_fe,
     "sc": sec_sc,
+    "ge": sec_ge,
 }
 
 
