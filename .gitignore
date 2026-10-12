@@ -5,3 +5,5 @@ scratch/
 # build products
 *.o
 ed25519
+__pycache__/
+*.pyc
