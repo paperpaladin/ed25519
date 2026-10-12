@@ -300,6 +300,14 @@ static void fe_mul(fe h, const fe f, const fe g)
 
 static void fe_sq(fe h, const fe f) { fe_mul(h, f, f); }
 
+/* Reachable only from the CLI, which is the differential harness. The
+ * library does not use fe_muls, and -Wunused-function is right to say so --
+ * it exists so that layer can be differenced from outside, which is this
+ * project's hard invariant. Guarded rather than deleted, and guarded
+ * rather than left to warn, because a build that always warns is a build
+ * whose warnings nobody reads.
+ */
+#ifdef ED25519_CLI
 static void fe_muls(fe h, const fe f, uint64_t s)
 {
 	fe c;
@@ -307,6 +315,7 @@ static void fe_muls(fe h, const fe f, uint64_t s)
 	c[0] = s;
 	fe_mul(h, f, c);
 }
+#endif
 
 /* Canonical 32-byte little-endian encoding: the unique representative in
  * [0, p). */
@@ -388,6 +397,14 @@ static int fe_isnegative(const fe f)
 	return s[0] & 1;
 }
 
+/* Reachable only from the CLI, which is the differential harness. The
+ * library does not use fe_eq, and -Wunused-function is right to say so --
+ * it exists so that layer can be differenced from outside, which is this
+ * project's hard invariant. Guarded rather than deleted, and guarded
+ * rather than left to warn, because a build that always warns is a build
+ * whose warnings nobody reads.
+ */
+#ifdef ED25519_CLI
 static int fe_eq(const fe f, const fe g)
 {
 	unsigned char a[32], b[32];
@@ -395,6 +412,7 @@ static int fe_eq(const fe f, const fe g)
 	fe_tobytes(b, g);
 	return memcmp(a, b, 32) == 0;
 }
+#endif
 
 /* h = f^e, e little-endian over nbits bits, square and multiply from the
  * top.  shortcut: the textbook ladder, 254 squarings and 254 conditional
@@ -594,6 +612,14 @@ static void ge_add(struct ge *r, const struct ge *p, const struct ge *q)
 	fe_mul(r->T, e, h);
 }
 
+/* Reachable only from the CLI, which is the differential harness. The
+ * library does not use ge_neg, and -Wunused-function is right to say so --
+ * it exists so that layer can be differenced from outside, which is this
+ * project's hard invariant. Guarded rather than deleted, and guarded
+ * rather than left to warn, because a build that always warns is a build
+ * whose warnings nobody reads.
+ */
+#ifdef ED25519_CLI
 static void ge_neg(struct ge *r, const struct ge *p)
 {
 	fe_neg(r->X, p->X);
@@ -601,11 +627,21 @@ static void ge_neg(struct ge *r, const struct ge *p)
 	fe_copy(r->Z, p->Z);
 	fe_neg(r->T, p->T);
 }
+#endif
 
+/* Reachable only from the CLI, which is the differential harness. The
+ * library does not use ge_isidentity, and -Wunused-function is right to say so --
+ * it exists so that layer can be differenced from outside, which is this
+ * project's hard invariant. Guarded rather than deleted, and guarded
+ * rather than left to warn, because a build that always warns is a build
+ * whose warnings nobody reads.
+ */
+#ifdef ED25519_CLI
 static int ge_isidentity(const struct ge *p)
 {
 	return !fe_isnonzero(p->X) && fe_eq(p->Y, p->Z);
 }
+#endif
 
 static void ge_tobytes(unsigned char s[32], const struct ge *p)
 {
@@ -774,6 +810,136 @@ static void ge_init(void)
 		ge_identity(&GE_B);
 		ge_ready = 0;
 	}
+}
+
+/* ===================================================================== *
+ * Ed25519 itself: RFC 8032 sections 5.1.5 (sign) and 5.1.7 (verify).
+ *
+ * Three things here are decisions rather than transcription, and each one
+ * is a place where an implementation can be wrong while passing its own
+ * round trip.
+ *
+ * SIGNING TAKES ONLY THE SEED.  The usual API hands sign() both the secret
+ * scalar and the public key, which saves one scalar multiplication per
+ * signature and admits a real attack: a caller that passes a public key
+ * not derived from the secret produces a signature that verifies under
+ * that key, which is how key-substitution goes wrong.  A() is recomputed
+ * from the seed every time instead.  It costs one scalarmult, about half
+ * the cost of a signature, and the footgun cannot be loaded.
+ *
+ * VERIFICATION IS COFACTORLESS: [S]B == R + [k]A, exactly as RFC 8032
+ * section 5.1.7 step 3 writes it, NOT the cofactored [8][S]B == [8]R +
+ * [8][k]A that some implementations use. The two disagree on signatures
+ * involving a small-order component, so this is a choice with observable
+ * consequences rather than an optimisation.
+ *
+ * NON-CANONICAL ENCODINGS ARE REFUSED.  ge_frombytes rejects any y in
+ * [p, 2^255), so a public key or an R that is not the canonical encoding
+ * of a point makes verification fail rather than being reduced mod p
+ * first.  That is stricter than several widely used implementations, and
+ * the difference is visible in the Wycheproof vectors.
+ * ===================================================================== */
+
+/* RFC 8032 5.1.5 step 2: clear the three low bits, clear the top bit, set
+ * the second-highest.  The low bits put the scalar in the prime-order
+ * subgroup; the top two pin its length so every scalar is 255 bits. */
+static void sc_clamp(unsigned char a[32])
+{
+	a[0] = (unsigned char)(a[0] & 248);
+	a[31] = (unsigned char)(a[31] & 127);
+	a[31] = (unsigned char)(a[31] | 64);
+}
+
+/* A seed expands into a secret scalar and a per-key signing prefix, which
+ * are the two halves of one SHA-512 of the seed. The prefix is what makes
+ * Ed25519 deterministic: it stands in for the random nonce a DSA-family
+ * signature would need, so there is no entropy source here at all. */
+static void sc_expand(const unsigned char seed[32], unsigned char a[32],
+		      unsigned char prefix[32])
+{
+	unsigned char h[64];
+
+	ed25519_sha512(seed, 32, h);
+	memcpy(a, h, 32);
+	sc_clamp(a);
+	memcpy(prefix, h + 32, 32);
+}
+
+void ed25519_keygen(const unsigned char seed[32], unsigned char pk[32])
+{
+	unsigned char a[32], prefix[32];
+	struct ge A;
+
+	ge_init();
+	sc_expand(seed, a, prefix);
+	ge_scalarmult(&A, a, &GE_B);
+	ge_tobytes(pk, &A);
+}
+
+void ed25519_sign(unsigned char sig[64], const void *msg, size_t len,
+		  const unsigned char seed[32])
+{
+	unsigned char a[32], prefix[32], pk[32], h[64], r[32], k[32];
+	struct ge A, R;
+	struct sha512 c;
+
+	ge_init();
+	sc_expand(seed, a, prefix);
+	ge_scalarmult(&A, a, &GE_B);
+	ge_tobytes(pk, &A);
+
+	/* r = H(prefix || M) mod L, then R = r*B. */
+	sha512_init(&c);
+	sha512_update(&c, prefix, 32);
+	sha512_update(&c, msg, len);
+	sha512_final(&c, h);
+	sc_reduce(r, h, 64);
+	ge_scalarmult(&R, r, &GE_B);
+	ge_tobytes(sig, &R);
+
+	/* k = H(R || A || M) mod L.  A is in there so a signature cannot be
+	 * replayed under a different public key. */
+	sha512_init(&c);
+	sha512_update(&c, sig, 32);
+	sha512_update(&c, pk, 32);
+	sha512_update(&c, msg, len);
+	sha512_final(&c, h);
+	sc_reduce(k, h, 64);
+
+	/* S = (r + k*a) mod L */
+	sc_muladd(sig + 32, k, a, r);
+}
+
+int ed25519_verify(const unsigned char sig[64], const void *msg, size_t len,
+		   const unsigned char pk[32])
+{
+	unsigned char h[64], k[32], lhs[32], rhs[32];
+	struct ge A, R, sB, kA, sum;
+	struct sha512 c;
+
+	ge_init();
+	/* S must be reduced.  An unreduced S gives a second valid signature
+	 * for the same message -- malleability, which this refuses. */
+	if (sc_geq_l(sig + 32))
+		return -1;
+	if (ge_frombytes(&A, pk) != 0)
+		return -1;
+	if (ge_frombytes(&R, sig) != 0)
+		return -1;
+
+	sha512_init(&c);
+	sha512_update(&c, sig, 32);
+	sha512_update(&c, pk, 32);
+	sha512_update(&c, msg, len);
+	sha512_final(&c, h);
+	sc_reduce(k, h, 64);
+
+	ge_scalarmult(&sB, sig + 32, &GE_B);
+	ge_scalarmult(&kA, k, &A);
+	ge_add(&sum, &R, &kA);
+	ge_tobytes(lhs, &sB);
+	ge_tobytes(rhs, &sum);
+	return memcmp(lhs, rhs, 32) == 0 ? 0 : -1;
 }
 
 /* ===================================================================== *
@@ -1065,6 +1231,53 @@ static void docmd(int argc, char **argv)
 	}
 	if (!strcmp(argv[0], "fe") && argc >= 3) {
 		cmd_fe(argc, argv);
+		return;
+	}
+	if (!strcmp(argv[0], "keygen") && argc == 2) {
+		unsigned char seed[32], pk[32];
+		if (!arg32(argv[1], seed)) {
+			puts("ERR hex");
+			return;
+		}
+		ed25519_keygen(seed, pk);
+		puthex(pk, 32);
+		putchar('\n');
+		return;
+	}
+	if (!strcmp(argv[0], "sign") && argc == 3) {
+		unsigned char seed[32], sig[64];
+		if (!arg32(argv[1], seed)) {
+			puts("ERR hex");
+			return;
+		}
+		/* An empty message is spelled "-": the CLI is whitespace
+		 * split, so a zero-length field cannot be written. RFC 8032's
+		 * first test vector has an empty message, so this is not a
+		 * corner worth leaving out. */
+		if (!strcmp(argv[2], "-"))
+			na = 0;
+		else if ((na = unhex(argv[2], a, sizeof a)) < 0) {
+			puts("ERR hex2");
+			return;
+		}
+		ed25519_sign(sig, a, (size_t)na, seed);
+		puthex(sig, 64);
+		putchar('\n');
+		return;
+	}
+	if (!strcmp(argv[0], "verify") && argc == 4) {
+		unsigned char pk[32], sig[64];
+		if (!arg32(argv[1], pk) || unhex(argv[3], sig, 64) != 64) {
+			puts("ERR hex");
+			return;
+		}
+		if (!strcmp(argv[2], "-"))
+			na = 0;
+		else if ((na = unhex(argv[2], a, sizeof a)) < 0) {
+			puts("ERR hex2");
+			return;
+		}
+		puts(ed25519_verify(sig, a, (size_t)na, pk) == 0 ? "1" : "0");
 		return;
 	}
 	if (!strcmp(argv[0], "sha512") && argc == 2) {

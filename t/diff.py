@@ -22,6 +22,24 @@ L = 2**252 + 27742317777372353535851937790883648493
 FAILED = 0
 
 
+SKIPPED = 0
+
+
+def skip(msg):
+    """Neither a pass nor a failure.
+
+    The Wycheproof vectors are not in the repository, so on a machine
+    without them this section cannot run -- and must not report `ok`.
+    t/run.sh counts only lines beginning "ok - " and "not ok - ", so this
+    prefix is invisible to both counters and visible to the reader, and
+    run.sh prints the skip count in its summary so a missing oracle cannot
+    be mistaken for a satisfied one.
+    """
+    global SKIPPED
+    SKIPPED += 1
+    print("skip - %s" % msg)
+
+
 def ok(cond, msg):
     global FAILED
     if cond:
@@ -443,11 +461,212 @@ def sec_ge(exe):
        "sign bits: %d/%d" % (n, len(nc)))
 
 
+# ------------------------------------------------------------- sign ---
+#
+# A second Ed25519, written from RFC 8032's ALGORITHM rather than from its
+# test vectors, sharing nothing with the C: Python integers against 51-bit
+# limbs, `pow` against fe_pow, and a different group representation.
+#
+# Written from the algorithm on purpose. Transcribing the RFC's vectors
+# would check the C against 7 published values; this checks it against an
+# independent implementation over as many keys and messages as there is
+# time for, and the vectors then come separately from Wycheproof.
+
+def ref_clamp(h):
+    a = bytearray(h[:32])
+    a[0] &= 248
+    a[31] &= 127
+    a[31] |= 64
+    return le(bytes(a))
+
+
+def ref_keygen(seed):
+    return ref_encode(ref_mul(ref_clamp(hashlib.sha512(seed).digest()), REF_B))
+
+
+def ref_sign(seed, msg):
+    h = hashlib.sha512(seed).digest()
+    a = ref_clamp(h)
+    A = ref_encode(ref_mul(a, REF_B))
+    r = le(hashlib.sha512(h[32:] + msg).digest()) % L
+    R = ref_encode(ref_mul(r, REF_B))
+    k = le(hashlib.sha512(R + A + msg).digest()) % L
+    return R + leb((r + k * a) % L)
+
+
+def ref_verify(pk, msg, sig):
+    """Cofactorless, S reduced, canonical encodings only -- as the C is."""
+    if len(sig) != 64 or len(pk) != 32:
+        return False
+    sval = le(sig[32:])
+    if sval >= L:
+        return False
+    A = ref_decode(pk)
+    R = ref_decode(sig[:32])
+    if A is None or R is None:
+        return False
+    k = le(hashlib.sha512(sig[:32] + pk + msg).digest()) % L
+    return (ref_encode(ref_mul(sval, REF_B))
+            == ref_encode(ref_add(R, ref_mul(k, A))))
+
+
+def sec_sign(exe):
+    rnd = random.Random(23)
+    # Message lengths that matter: empty (RFC 8032's first vector), one
+    # byte, and either side of SHA-512's 128-byte block boundary, where a
+    # buffering bug in the hash would show up only here.
+    lens = [0, 1, 2, 31, 32, 63, 64, 111, 127, 128, 129, 191, 192, 193, 255,
+            256, 257, 1023, 1024]
+    cases = []
+    for n in lens:
+        cases.append((bytes(rnd.randrange(256) for _ in range(32)),
+                      bytes(rnd.randrange(256) for _ in range(n))))
+    for _ in range(60):
+        cases.append((bytes(rnd.randrange(256) for _ in range(32)),
+                      bytes(rnd.randrange(256)
+                            for _ in range(rnd.randrange(0, 200)))))
+    # Seeds that are all-zero and all-ones, because a clamp applied to the
+    # wrong half of the digest survives random seeds.
+    cases.append((bytes(32), b"abc"))
+    cases.append((b"\xff" * 32, b"abc"))
+
+    def mhex(m):
+        return m.hex() if m else "-"
+
+    cmds, want = [], []
+    for seed, msg in cases:
+        cmds.append("keygen " + seed.hex())
+        want.append(ref_keygen(seed).hex())
+        cmds.append("sign %s %s" % (seed.hex(), mhex(msg)))
+        want.append(ref_sign(seed, msg).hex())
+    got = batch(exe, cmds)
+    bad = [i for i in range(len(cmds)) if got[i] != want[i]]
+    msg_ = ("keygen and sign == an independent Python Ed25519 on %d cases "
+            "(message lengths 0..1024, including both sides of SHA-512's "
+            "128-byte block)" % len(cases))
+    if bad:
+        msg_ += " -- first bad: `%s` -> %s, want %s" % (
+            cmds[bad[0]][:60], got[bad[0]], want[bad[0]])
+    ok(not bad, msg_)
+
+    # Verification. A signer that verifies its own output proves nothing,
+    # so every signature is also checked against the reference's verdict,
+    # and then damaged in each of the ways that matter and checked again.
+    cmds, want = [], []
+    for seed, msg in cases[:40]:
+        pk = ref_keygen(seed)
+        sig = ref_sign(seed, msg)
+        cmds.append("verify %s %s %s" % (pk.hex(), mhex(msg), sig.hex()))
+        want.append("1" if ref_verify(pk, msg, sig) else "0")
+        # One flipped bit, in R, in S, in the message, and in the key.
+        for label, bad_pk, bad_msg, bad_sig in (
+                ("R", pk, msg, bytes([sig[0] ^ 1]) + sig[1:]),
+                ("S", pk, msg, sig[:40] + bytes([sig[40] ^ 1]) + sig[41:]),
+                ("msg", pk, (msg + b"\x00") if not msg else
+                 bytes([msg[0] ^ 1]) + msg[1:], sig),
+                ("pk", bytes([pk[0] ^ 1]) + pk[1:], msg, sig)):
+            cmds.append("verify %s %s %s"
+                        % (bad_pk.hex(), mhex(bad_msg), bad_sig.hex()))
+            want.append("1" if ref_verify(bad_pk, bad_msg, bad_sig) else "0")
+    got = batch(exe, cmds)
+    bad = [i for i in range(len(cmds)) if got[i] != want[i]]
+    accepted = sum(1 for w in want if w == "1")
+    msg_ = ("verify agrees with the reference on %d signatures, %d good and "
+            "%d damaged in R, S, the message or the key"
+            % (len(cmds), accepted, len(cmds) - accepted))
+    if bad:
+        msg_ += " -- first bad: `%s` -> %s, want %s" % (
+            cmds[bad[0]][:60], got[bad[0]], want[bad[0]])
+    ok(not bad, msg_)
+
+    # Malleability: S + L is the same scalar mod L, so an implementation
+    # that reduces S instead of refusing it accepts a second signature for
+    # a message it already signed. RFC 8032 requires the refusal.
+    cmds = []
+    for seed, msg in cases[:25]:
+        pk, sig = ref_keygen(seed), ref_sign(seed, msg)
+        mal = sig[:32] + leb(le(sig[32:]) + L)
+        cmds.append("verify %s %s %s" % (pk.hex(), mhex(msg), mal.hex()))
+    got = batch(exe, cmds)
+    n = sum(1 for g in got if g == "0")
+    ok(n == len(cmds), "S + L is refused rather than reduced, so a "
+       "signature cannot be mauled into a second valid one: %d/%d"
+       % (n, len(cmds)))
+
+
+# ------------------------------------------------------- wycheproof ---
+#
+# Published vectors, and the only oracle here that was written by people
+# trying to break implementations rather than to describe one. Wycheproof's
+# EDDSA set is where the cases nobody thinks of live: signatures with S
+# beyond L, non-canonical point encodings, small-order public keys,
+# truncated and garbage-appended signatures.
+#
+# The file is not in the repository -- it is third-party data, it is large,
+# and vendoring it would mean this project shipping someone else's test
+# suite. Put it at scratch/wp_ed.json (the EDDSA verify set from the
+# Project Wycheproof repository, testvectors/ed25519_test.json) and this
+# section runs; without it the section SKIPS, loudly, and the skip is
+# counted separately from the passes.
+
+WYCHEPROOF_ED = "scratch/wp_ed.json"
+
+
+def sec_wycheproof(exe):
+    import json
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), WYCHEPROOF_ED)
+    if not os.path.exists(path):
+        skip("Wycheproof EDDSA vectors absent (%s); put the EDDSA verify "
+             "set there to run them" % WYCHEPROOF_ED)
+        return
+    with open(path) as fh:
+        data = json.load(fh)
+    if data.get("algorithm") != "EDDSA":
+        skip("%s is not the EDDSA set (algorithm=%r) -- the XDH set is a "
+             "different file and would silently test nothing"
+             % (WYCHEPROOF_ED, data.get("algorithm")))
+        return
+
+    cmds, want, meta = [], [], []
+    for group in data["testGroups"]:
+        pk = group["publicKey"]["pk"]
+        for t in group["tests"]:
+            expect = "1" if t["result"] == "valid" else "0"
+            if len(t["sig"]) != 128:
+                # Our CLI takes exactly 64 signature bytes, so a truncated
+                # or over-long signature cannot be handed to it at all.
+                # That is the right answer -- such a signature is invalid --
+                # but it is the harness refusing, not the implementation, so
+                # it is recorded rather than counted as a verify result.
+                meta.append((t["tcId"], expect, None))
+                continue
+            cmds.append("verify %s %s %s"
+                        % (pk, t["msg"] or "-", t["sig"]))
+            want.append(expect)
+            meta.append((t["tcId"], expect, len(cmds) - 1))
+    got = batch(exe, cmds)
+    bad = [i for i in range(len(cmds)) if got[i] != want[i]]
+    nvalid = sum(1 for w in want if w == "1")
+    byharness = sum(1 for _, _, i in meta if i is None)
+    msg = ("%d Wycheproof EDDSA vectors agree (%d valid, %d invalid"
+           % (len(cmds), nvalid, len(cmds) - nvalid))
+    msg += "; %d more have a signature that is not 64 bytes and are " \
+           "rejected by length alone)" % byharness if byharness else ")"
+    if bad:
+        tc = [m[0] for m in meta if m[2] == bad[0]]
+        msg += " -- first bad: tcId %s wanted %s got %s" % (
+            tc[0] if tc else "?", want[bad[0]], got[bad[0]])
+    ok(not bad, msg)
+
+
 SECTIONS = {
     "sha512": sec_sha512,
     "fe": sec_fe,
     "sc": sec_sc,
     "ge": sec_ge,
+    "sign": sec_sign,
+    "wycheproof": sec_wycheproof,
 }
 
 

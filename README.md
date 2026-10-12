@@ -12,7 +12,7 @@ code with it.
 
 ```
 $ make test
-23 passed, 0 failed
+30 passed, 0 failed
 ```
 
 ## Why every layer has its own oracle
@@ -33,6 +33,9 @@ can be differenced from outside:
 | field mod 2^255-19 | Python arbitrary-precision integers | nothing: no limbs, no carries |
 | scalars mod L | Python integers mod L | nothing |
 | the group | 40 lines of Python from RFC 8032 5.1.3 / 5.1.4 | nothing |
+| scalar multiplication | the same Python integers | nothing |
+| sign and verify | a second Ed25519 in Python, from the RFC's *algorithm* | nothing |
+| sign and verify | Project Wycheproof's EDDSA vectors | nothing: written to break implementations |
 | the constants | the values RFC 8032 5.1 prints | they are the document |
 
 ```
@@ -45,6 +48,14 @@ ok - the base point encodes to RFC 8032's 5866...66
 ok - group law == the Python reference on 1848 operations over 307 points
      (3 of the encodings are not points and must say so)
 ok - every non-canonical y in [p, 2^255) rejected, both sign bits: 38/38
+ok - keygen and sign == an independent Python Ed25519 on 81 cases
+     (message lengths 0..1024, including both sides of SHA-512's 128-byte block)
+ok - verify agrees with the reference on 200 signatures, 40 good and 160
+     damaged in R, S, the message or the key
+ok - S + L is refused rather than reduced, so a signature cannot be mauled
+     into a second valid one: 25/25
+ok - 139 Wycheproof EDDSA vectors agree (88 valid, 51 invalid; 12 more have
+     a signature that is not 64 bytes and are rejected by length alone)
 ```
 
 The constants are the detail worth noticing: they are **derived from their
@@ -66,6 +77,39 @@ coreutils and openssl. Here it is checked against `hashlib` again anyway, so
 the vendored copy carries its own oracle on this side of the fence rather
 than being trusted because it passed next door.
 
+## Three decisions in the signature, not transcription
+
+Most of RFC 8032 is transcription. Three things are choices, and each is a
+place an implementation can be wrong while passing its own round trip --
+which is why "sign, then verify" proves nothing.
+
+**Signing takes only the seed.** The usual API hands `sign()` both the
+secret scalar and the public key, saving one scalar multiplication per
+signature. It also admits a real attack: a caller who passes a public key
+not derived from the secret gets a signature that verifies under *that*
+key. `A` is recomputed from the seed every time instead. It costs about
+half the price of a signature, and the footgun cannot be loaded.
+
+**Verification is cofactorless.** `[S]B == R + [k]A`, exactly as RFC 8032
+section 5.1.7 step 3 writes it -- not the cofactored `[8][S]B == [8]R +
+[8][k]A` that several implementations use. The two disagree on signatures
+with a small-order component, so this is a choice with observable
+consequences rather than an optimisation.
+
+**Non-canonical encodings are refused.** Any `y` in `[p, 2^255)` is
+rejected rather than reduced mod `p` first, for public keys and for `R`.
+That is stricter than several widely used libraries, and the difference is
+visible in the Wycheproof vectors.
+
+### Malleability
+
+`S` and `S + L` are the same scalar mod `L`, so an implementation that
+*reduces* `S` instead of refusing it accepts a second valid signature for a
+message it has already signed. This refuses it, and both oracles check that
+independently: the differential constructs `S + L` for 25 signatures and
+requires a rejection, and Wycheproof's 8 `SignatureMalleability` vectors
+require the same. Deleting the one `if` turns both red.
+
 ## Scalars by long division, on purpose
 
 Reduction mod L the fast way -- Barrett, or Montgomery -- is a page of magic
@@ -76,28 +120,36 @@ replacement checkable.
 
 ## What does not work
 
-**There is no signing or verification.** `ed25519.h` declares exactly one
-function, `ed25519_sha512`. The field, the scalars and the group are
-finished and differenced; the thing they were built for is the next planned
-item and is not written. The repository name currently overstates what is
-here.
+**Not constant-time, and that is a stated non-goal rather than a to-do.**
+`ge_scalarmult` skips the addition when the scalar bit is clear, so both
+the running time and the cache footprint depend on the private scalar. A
+half-hardened implementation invites exactly the use this must not have, so
+it is not half-hardened.
 
-**The HEAD commit is a WIP commit.** A session building this repo was cut
-off partway through wiring up the Wycheproof vectors, and that commit records
-the tree as it stood. It builds and the suite passes; the feature it was in
-the middle of is absent.
+**The Wycheproof vectors are not in the repository.** They are third-party
+data, and vendoring them would mean this project shipping someone else's
+test suite. Put the EDDSA verify set at `scratch/wp_ed.json` and they run;
+without it that section **skips**, and the skip is counted and printed
+separately from the passes:
+
+```
+29 passed, 0 failed, 1 SKIPPED
+  skipped: Wycheproof EDDSA vectors absent (scratch/wp_ed.json); ...
+```
+
+A skipped oracle that reported `ok` would be exactly the kind of test this
+project exists not to have. The section also checks the file is the EDDSA
+set and skips if it is not -- the XDH set is a different file with the same
+shape, and it was sitting in the same directory.
 
 **No X25519**, despite the file header mentioning RFC 7748. The Wycheproof
-XDH vectors are downloaded (518 tests) and nothing reads them.
+XDH vectors are on disk (518 tests) and nothing reads them.
 
-**No Wycheproof.** 151 EDDSA verify tests sit in `scratch/wp_ed.json`,
-which is gitignored, and nothing reads them either. Wycheproof is where the
-edge cases live -- small-order points, non-canonical encodings, signatures
-with S >= L -- so until it runs, the published-vector coverage is the RFC's
-happy path plus whatever the differential harness happens to generate.
+**Only the pure Ed25519 variant.** No Ed25519ph, no Ed25519ctx, no
+prehashing, and no batch verification.
 
-**Not constant-time, and that is a stated non-goal rather than a to-do.** A
-half-hardened implementation invites exactly the use this must not have.
+**One message at a time, in memory.** There is no streaming signing API, so
+a message has to fit in a buffer.
 
 No other curves, no assembly, no install target, no stable ABI.
 

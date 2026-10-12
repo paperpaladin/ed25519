@@ -16,6 +16,9 @@ first.
 ed25519 fe  OP ...        field arithmetic mod 2^255-19
 ed25519 sc  OP ...        scalar arithmetic mod L
 ed25519 ge  OP ...        group operations on the curve
+ed25519 keygen SEED      the public key for a 32-byte seed
+ed25519 sign SEED MSG    a signature, or "-" for an empty message
+ed25519 verify PK MSG SIG   1 if the signature is good, 0 if not
 ```
 
 The CLI exists for the differential harness: every internal layer is
@@ -147,23 +150,70 @@ harder to difference against Python.
             within each byte, the unexamined top bit, and doubling after
             the add instead of before.
 
-- [ ] 04 keygen, sign and verify, against the RFC 8032 section 7.1 vectors
-      why: this is the whole point of the repo and it is not done. There is
-           no `ed25519_sign` yet -- `ed25519.h` declares only
-           `ed25519_sha512`. The layers below are finished and differenced;
-           the thing they were built for is missing.
-      note: one of the section 7.1 vectors has a SHA-512 digest as its
-            message, which is why `ed25519_sha512` is exported at all.
-- [ ] 05 the Wycheproof Ed25519 vectors
-      why: THIS IS THE INTERRUPTED FEATURE. `scratch/wp_ed.json` was
-           already downloaded when the session building this repo was cut
-           off, and the WIP commit at HEAD records the tree mid-change.
-           Wycheproof is the set of edge cases nobody thinks of: small-order
-           points, non-canonical encodings, signatures with S >= L.
-           151 verify tests in the file already downloaded.
-      note: the JSON is data, not a build script, so using it is fine. It
-            lives in `scratch/`, which is gitignored, so the harness has to
-            skip cleanly when it is absent rather than fail.
+- [x] 04 keygen, sign and verify
+      why: the whole point of the repo, and it was the thing missing. The
+           layers below were finished and differenced and `ed25519.h`
+           declared one function.
+      done: and the oracle is an independent Ed25519 in Python written from
+            RFC 8032's ALGORITHM rather than from its vectors. Transcribing
+            the section 7.1 vectors would check this against seven
+            published values; differencing against a second implementation
+            checks it against as many keys and messages as there is time
+            for, and the published vectors then come separately from
+            Wycheproof, which is item 05.
+      proves: keygen and sign agree on 81 cases with message lengths 0 to
+            1024 -- including 0, and both sides of SHA-512's 128-byte block
+            where a buffering bug would hide. verify agrees on 200
+            signatures, 40 good and 160 damaged in R, in S, in the message
+            and in the key, because a signer that verifies its own output
+            has proved nothing.
+      note: three things here are decisions rather than transcription.
+            SIGNING TAKES ONLY THE SEED: handing sign() a public key as
+            well saves a scalarmult and admits a key-substitution attack,
+            so A is recomputed every time. VERIFICATION IS COFACTORLESS,
+            [S]B == R + [k]A exactly as 5.1.7 step 3 writes it rather than
+            the cofactored form, which disagrees on small-order
+            components. NON-CANONICAL ENCODINGS ARE REFUSED rather than
+            reduced mod p, which is stricter than several widely used
+            libraries.
+      note: S and S+L are the same scalar mod L, so refusing an unreduced S
+            is what stops a signature being mauled into a second valid one.
+            Both oracles check it independently -- the differential builds
+            S+L for 25 signatures, and Wycheproof has 8 malleability
+            vectors -- and deleting the one `if` turns both red.
+      found: the library build had eight unused-function warnings, which
+            were the missing feature showing up as dead code: nothing in
+            the public API reached the fe, sc or ge layers. Implementing
+            this consumed most of them; the four that remain -- fe_muls,
+            fe_eq, ge_isidentity, ge_neg -- are reachable only from the
+            CLI, which is the differential harness, so they are now
+            guarded by ED25519_CLI rather than left to warn. A build that
+            always warns is a build whose warnings nobody reads.
+- [x] 05 the Wycheproof Ed25519 vectors
+      why: THIS WAS THE INTERRUPTED FEATURE. scratch/wp_ed.json was already
+           downloaded when the session building this repo was cut off.
+           Wycheproof is the set of edge cases nobody thinks of, and the
+           only oracle here written by people trying to break
+           implementations rather than to describe one.
+      done: all 151 agree. 139 go through verify (88 valid, 51 invalid) and
+            12 have a signature that is not 64 bytes, which the harness
+            rejects by length -- recorded as such rather than counted as a
+            verify result, because that is the harness refusing and not the
+            implementation.
+      note: the file is NOT vendored. It is third-party data and shipping
+            it would mean this project carrying someone else's test suite.
+            Absent, the section SKIPS -- and the skip is counted and
+            printed separately from the passes, because a skipped oracle
+            reporting `ok` is exactly the failure this project exists not
+            to have. t/run.sh counts only lines beginning "ok - " and
+            "not ok - ", so "skip - " is invisible to both.
+      note: it also checks the file is the EDDSA set and skips if it is
+            not. The XDH set is a different file with the same shape, it
+            was sitting in the same directory under two names, and loading
+            it would have tested nothing while reporting a pass.
+      found: both skip paths were tested by making them happen -- moving
+            the file away, and putting the XDH file in its place. An
+            untested skip is a test that passes for the wrong reason.
 - [ ] 06 X25519 (RFC 7748), and its own Wycheproof vectors (518 tests,
       already downloaded as `scratch/wp_x.json`)
       why: the header already claims X25519 and nothing implements it. The

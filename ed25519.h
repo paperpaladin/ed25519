@@ -20,4 +20,22 @@
  * digest.  VENDORED from the sibling ../sha2 -- see ed25519.c. */
 void ed25519_sha512(const void *data, size_t len, unsigned char out[64]);
 
+/* Ed25519, RFC 8032.  A secret key is a 32-byte seed; the public key is
+ * derived from it, and ed25519_sign takes only the seed so a public key
+ * that does not match cannot be passed in. */
+#define ED25519_SEED_BYTES       32
+#define ED25519_PUBLIC_KEY_BYTES 32
+#define ED25519_SIGNATURE_BYTES  64
+
+void ed25519_keygen(const unsigned char seed[32], unsigned char pk[32]);
+
+void ed25519_sign(unsigned char sig[64], const void *msg, size_t len,
+		  const unsigned char seed[32]);
+
+/* 0 if the signature is good, -1 otherwise.  Refuses an unreduced S and
+ * any non-canonical point encoding, and uses the cofactorless equation
+ * [S]B == R + [k]A that RFC 8032 5.1.7 specifies. */
+int ed25519_verify(const unsigned char sig[64], const void *msg, size_t len,
+		   const unsigned char pk[32]);
+
 #endif /* ED25519_H */
