@@ -594,6 +594,174 @@ def sec_sign(exe):
        % (n, len(cmds)))
 
 
+# ----------------------------------------------------------- x25519 ---
+#
+# Three oracles, and they are NOT equally independent. Saying which is
+# which matters more here than anywhere else in this file, because the
+# obvious one is the weakest.
+#
+# 1. THE BIRATIONAL MAP, which is the strong one. Curve25519 and
+#    edwards25519 are the same group in different coordinates, and RFC 7748
+#    section 4.1 gives the correspondence: u = (1 + y) / (1 - y). So
+#    x25519_base(k) can be computed a second way -- take [clamp(k)]B on the
+#    EDWARDS curve, with the group law already differenced above, and map
+#    the resulting y. That shares no algorithm with the Montgomery ladder:
+#    different coordinates, different formula, different number of field
+#    operations.
+#
+# 2. DIFFIE-HELLMAN AGREEMENT, which needs no reference implementation at
+#    all. X25519(a, X25519(b, 9)) == X25519(b, X25519(a, 9)), because both
+#    are [a*b]G. A metamorphic relation, and the only check here that would
+#    still mean something if every reference were wrong the same way.
+#
+# 3. A Python transcription of the ladder, which is the WEAK one and is
+#    included anyway. It is the same algorithm in a different
+#    representation, so it differences 51-bit limbs against Python
+#    integers -- a real check on the field arithmetic in this context, and
+#    no check at all on whether the ladder is the right ladder. If the
+#    pseudocode were copied wrongly, this oracle would agree enthusiastically
+#    and oracles 1 and 2 would not.
+
+X_A24 = 121665
+
+
+def ref_x25519(k, u):
+    """RFC 7748 section 5, transcribed. The weak oracle -- see above."""
+    kc = bytearray(k)
+    kc[0] &= 248
+    kc[31] &= 127
+    kc[31] |= 64
+    kk = le(bytes(kc))
+    x1 = le(u) % 2**255           # decodeUCoordinate masks bit 255
+    x2, z2, x3, z3, swap = 1, 0, x1, 1, 0
+    for t in range(254, -1, -1):
+        kt = (kk >> t) & 1
+        swap ^= kt
+        if swap:
+            x2, x3 = x3, x2
+            z2, z3 = z3, z2
+        swap = kt
+        a = (x2 + z2) % P
+        aa = a * a % P
+        b = (x2 - z2) % P
+        bb = b * b % P
+        e = (aa - bb) % P
+        c = (x3 + z3) % P
+        dd = (x3 - z3) % P
+        da = dd * a % P
+        cb = c * b % P
+        x3 = (da + cb) ** 2 % P
+        z3 = x1 * (da - cb) ** 2 % P
+        x2 = aa * bb % P
+        z2 = e * (aa + X_A24 * e) % P
+    if swap:
+        x2, x3 = x3, x2
+        z2, z3 = z3, z2
+    return leb(x2 * pow(z2, P - 2, P) % P)
+
+
+def ref_x25519_base_via_edwards(k):
+    """x25519_base the other way round: Edwards scalarmult, then the map.
+
+    u = (1 + y) / (1 - y), RFC 7748 section 4.1. Shares no algorithm with
+    the Montgomery ladder, which is what makes it worth having.
+    """
+    kc = bytearray(k)
+    kc[0] &= 248
+    kc[31] &= 127
+    kc[31] |= 64
+    x, y, z, _ = ref_mul(le(bytes(kc)), REF_B)
+    zi = pow(z, P - 2, P)
+    y = y * zi % P
+    return leb((1 + y) * pow((1 - y) % P, P - 2, P) % P)
+
+
+def sec_x25519(exe):
+    rnd = random.Random(31)
+    keys = [bytes(rnd.randrange(256) for _ in range(32)) for _ in range(40)]
+    # Scalars whose clamping matters: all-zero, all-ones, and the two
+    # patterns that differ only in the bits the clamp forces.
+    keys += [bytes(32), b"\xff" * 32,
+             bytes([0xff] + [0] * 31), bytes([0] * 31 + [0xff])]
+
+    # 1. the strong oracle: the same point reached through the other curve.
+    cmds = ["x25519base " + k.hex() for k in keys]
+    want = [ref_x25519_base_via_edwards(k).hex() for k in keys]
+    got = batch(exe, cmds)
+    bad = [i for i in range(len(cmds)) if got[i] != want[i]]
+    msg = ("x25519_base == [k]B on the EDWARDS curve mapped through "
+           "u = (1+y)/(1-y), on %d scalars -- a different curve form, a "
+           "different algorithm" % len(keys))
+    if bad:
+        msg += " -- first bad: `%s` -> %s, want %s" % (
+            cmds[bad[0]][:48], got[bad[0]], want[bad[0]])
+    ok(not bad, msg)
+
+    # 2. the oracle that needs no reference: both sides are [a*b]G.
+    cmds, pairs = [], []
+    for i in range(0, 20, 2):
+        a, b = keys[i], keys[i + 1]
+        pairs.append((a, b))
+        cmds.append("x25519base " + a.hex())
+        cmds.append("x25519base " + b.hex())
+    pub = batch(exe, cmds)
+    cmds2 = []
+    for n, (a, b) in enumerate(pairs):
+        cmds2.append("x25519 %s %s" % (a.hex(), pub[2 * n + 1]))
+        cmds2.append("x25519 %s %s" % (b.hex(), pub[2 * n]))
+    got = batch(exe, cmds2)
+    agree = sum(1 for n in range(len(pairs))
+                if got[2 * n] == got[2 * n + 1])
+    ok(agree == len(pairs),
+       "Diffie-Hellman agrees on %d/%d key pairs, which needs no reference "
+       "implementation at all" % (agree, len(pairs)))
+
+    # 3. the weak oracle: same algorithm, different representation.
+    cmds, want = [], []
+    us = [k for k in keys[:20]]
+    us += [bytes(32), bytes([1] + [0] * 31), leb(P - 1), leb(P), leb(P + 1),
+           b"\xff" * 32]
+    for i, u in enumerate(us):
+        k = keys[i % len(keys)]
+        cmds.append("x25519 %s %s" % (k.hex(), u.hex()))
+        want.append(ref_x25519(k, u).hex())
+    got = batch(exe, cmds)
+    bad = [i for i in range(len(cmds)) if got[i] != want[i]]
+    msg = ("the ladder == the RFC 7748 pseudocode in Python on %d products, "
+           "including u = 0, 1, p-1, p and p+1 (same algorithm, so this "
+           "checks the limbs and not the ladder)" % len(cmds))
+    if bad:
+        msg += " -- first bad: `%s` -> %s, want %s" % (
+            cmds[bad[0]][:48], got[bad[0]], want[bad[0]])
+    ok(not bad, msg)
+
+    # The clamp clears the three low bits, which is why the final
+    # conditional swap in RFC 7748's pseudocode can never fire here: the
+    # loop's last iteration sets swap to bit 0 of the scalar. Asserted
+    # because the code relies on it to call that swap dead, and because a
+    # mutation that deletes the swap survives -- correctly, as an
+    # equivalent mutant, which is only true while this holds.
+    lowbits = []
+    for k in keys:
+        kc = bytearray(k)
+        kc[0] &= 248
+        if kc[0] & 7:
+            lowbits.append(k.hex())
+    ok(not lowbits, "the clamp clears the three low bits of every scalar, "
+       "so the ladder's closing conditional swap can never fire")
+
+    # A low-order u gives an all-zero shared secret. RFC 7748 makes
+    # rejecting that optional and this does not reject it, so the value is
+    # asserted rather than the refusal -- a caller doing Diffie-Hellman is
+    # the one that has to care.
+    zero = batch(exe, ["x25519 %s %s" % (keys[0].hex(), bytes(32).hex()),
+                       "x25519 %s %s" % (keys[0].hex(),
+                                         bytes([1] + [0] * 31).hex())])
+    ok(all(z == bytes(32).hex() for z in zero),
+       "u = 0 and u = 1 are low order, so the shared secret is all zero "
+       "rather than an error -- which RFC 7748 permits and the header says")
+
+
 # ------------------------------------------------------- wycheproof ---
 #
 # Published vectors, and the only oracle here that was written by people
@@ -610,6 +778,7 @@ def sec_sign(exe):
 # counted separately from the passes.
 
 WYCHEPROOF_ED = "scratch/wp_ed.json"
+WYCHEPROOF_X = "scratch/wp_x.json"
 
 
 def sec_wycheproof(exe):
@@ -660,6 +829,42 @@ def sec_wycheproof(exe):
     ok(not bad, msg)
 
 
+def sec_wycheproof_x(exe):
+    """The XDH set: 518 vectors, every one with an expected shared secret.
+
+    None of them is "invalid": X25519 is defined on every 32-byte string, so
+    a twist point or a low-order key has an answer rather than an error.
+    254 are marked "acceptable", meaning an implementation may compute the
+    secret or refuse -- this one computes, so the expected value applies to
+    all 518.
+    """
+    import json
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), WYCHEPROOF_X)
+    if not os.path.exists(path):
+        skip("Wycheproof XDH vectors absent (%s)" % WYCHEPROOF_X)
+        return
+    with open(path) as fh:
+        data = json.load(fh)
+    if data.get("algorithm") != "XDH":
+        skip("%s is not the XDH set (algorithm=%r)"
+             % (WYCHEPROOF_X, data.get("algorithm")))
+        return
+    tests = [t for g in data["testGroups"] for t in g["tests"]]
+    cmds = ["x25519 %s %s" % (t["private"], t["public"]) for t in tests]
+    got = batch(exe, cmds)
+    bad = [i for i in range(len(cmds)) if got[i] != tests[i]["shared"]]
+    nacc = sum(1 for t in tests if t["result"] == "acceptable")
+    msg = ("%d Wycheproof XDH vectors agree (%d acceptable: twist points, "
+           "low-order and non-canonical keys, all with an expected answer)"
+           % (len(cmds), nacc))
+    if bad:
+        msg += " -- first bad: tcId %s (%s) -> %s, want %s" % (
+            tests[bad[0]]["tcId"], ",".join(tests[bad[0]].get("flags", [])),
+            got[bad[0]], tests[bad[0]]["shared"])
+    ok(not bad, msg)
+
+
 SECTIONS = {
     "sha512": sec_sha512,
     "fe": sec_fe,
@@ -667,6 +872,8 @@ SECTIONS = {
     "ge": sec_ge,
     "sign": sec_sign,
     "wycheproof": sec_wycheproof,
+    "x25519": sec_x25519,
+    "wycheproof_x": sec_wycheproof_x,
 }
 
 

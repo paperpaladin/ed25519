@@ -46,4 +46,20 @@ void ed25519_sign(unsigned char sig[64], const void *msg, size_t len,
 int ed25519_verify(const unsigned char sig[64], const void *msg, size_t len,
 		   const unsigned char pk[32]);
 
+/* X25519, RFC 7748.  Defined on every 32-byte string: there is no input
+ * validation and none is required -- half of all u values put the point on
+ * the twist rather than on Curve25519 and the result is still safe to use.
+ *
+ * x25519_base is x25519 against u = 9, RFC 7748's generator.
+ *
+ * Callers doing Diffie-Hellman may want to reject an all-zero output,
+ * which happens exactly when the peer sent a low-order point.  RFC 7748
+ * makes that check optional for X25519 and it is not done here. */
+#define X25519_KEY_BYTES 32
+
+void x25519(unsigned char out[32], const unsigned char k[32],
+	    const unsigned char u[32]);
+
+void x25519_base(unsigned char out[32], const unsigned char k[32]);
+
 #endif /* ED25519_H */

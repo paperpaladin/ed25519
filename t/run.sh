@@ -54,18 +54,31 @@ printf -- '\n--- oracle: an independent Ed25519 in Python, written from the\n'
 printf -- '    RFC 8032 algorithm rather than from its vectors\n'
 run "diff.py sign" python3 t/diff.py "$E" sign
 
+printf -- '\n--- oracle: the OTHER curve form -- [k]B on edwards25519 mapped\n'
+printf -- '    through u = (1+y)/(1-y), plus DH agreement, which needs none\n'
+run "diff.py x25519" python3 t/diff.py "$E" x25519
+
 printf -- '\n--- oracle: Project Wycheproof EDDSA vectors, if present\n'
 run "diff.py wycheproof" python3 t/diff.py "$E" wycheproof
+
+printf -- '\n--- oracle: Project Wycheproof XDH vectors, if present\n'
+run "diff.py wycheproof_x" python3 t/diff.py "$E" wycheproof_x
 
 printf -- '\n=== oracles\n'
 printf -- '  CPython hashlib               ran (no network needed)\n'
 printf -- '  Python integers mod p and L   ran (no network needed)\n'
 printf -- '  Python reference group        ran (no network needed)\n'
 printf -- '  An independent Ed25519        ran (no network needed)\n'
+printf -- '  edwards25519, the other form  ran (no network needed)\n'
 if [ -f scratch/wp_ed.json ]; then
 	printf -- '  Project Wycheproof EDDSA      ran\n'
 else
 	printf -- '  Project Wycheproof EDDSA      ABSENT (scratch/wp_ed.json)\n'
+fi
+if [ -f scratch/wp_x.json ]; then
+	printf -- '  Project Wycheproof XDH        ran\n'
+else
+	printf -- '  Project Wycheproof XDH        ABSENT (scratch/wp_x.json)\n'
 fi
 
 pass=$(grep -c '^ok - ' "$OUT")

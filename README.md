@@ -6,13 +6,13 @@ the bits of the private scalar, so anything that can measure how long it
 runs, or watch its cache footprint, can recover the key. Do not use it to
 protect anything.
 
-It exists to be *correct*: Ed25519 (RFC 8032) built up from the field
-arithmetic, with every layer differenced against something that shares no
-code with it.
+It exists to be *correct*: Ed25519 (RFC 8032) and X25519 (RFC 7748) built
+up from the field arithmetic, with every layer differenced against
+something that shares no code with it.
 
 ```
 $ make test
-30 passed, 0 failed
+36 passed, 0 failed
 ```
 
 ## Why every layer has its own oracle
@@ -36,6 +36,9 @@ can be differenced from outside:
 | scalar multiplication | the same Python integers | nothing |
 | sign and verify | a second Ed25519 in Python, from the RFC's *algorithm* | nothing |
 | sign and verify | Project Wycheproof's EDDSA vectors | nothing: written to break implementations |
+| X25519 | the *same point* reached through the Edwards curve | nothing: a different curve form |
+| X25519 | Diffie-Hellman agreeing with itself | nothing: no reference at all |
+| X25519 | Project Wycheproof's XDH vectors | nothing |
 | the constants | the values RFC 8032 5.1 prints | they are the document |
 
 ```
@@ -76,6 +79,72 @@ Over in `../sha2` it is checked against the NIST CAVP vectors, CPython,
 coreutils and openssl. Here it is checked against `hashlib` again anyway, so
 the vendored copy carries its own oracle on this side of the fence rather
 than being trusted because it passed next door.
+
+## X25519, and three oracles that are not equally independent
+
+Curve25519 is the same group as edwards25519 in coordinates that make a
+different operation cheap, so X25519 reuses the field arithmetic and
+nothing else: the ladder is x-only, needing no point decoding, no square
+root and no sign bit.
+
+Which oracle to believe matters more here than anywhere else in this repo,
+because the obvious one is the weakest. In order of how little they share
+with the code:
+
+**The birational map.** RFC 7748 section 4.1 gives the correspondence
+between the two curve forms, `u = (1 + y) / (1 - y)`. So `x25519_base(k)`
+can be computed a second way: take `[clamp(k)]B` on the **Edwards** curve,
+whose group law is already differenced against Python, and map the `y` that
+comes out. Different coordinates, different formula, different number of
+field operations -- and it agrees on all 44 scalars.
+
+**Diffie-Hellman agreeing with itself.** `X25519(a, X25519(b, 9))` equals
+`X25519(b, X25519(a, 9))` because both are `[a*b]G`. This is the only check
+here that would still mean something if every reference implementation were
+wrong in the same way.
+
+**A Python transcription of the ladder.** This is the weak one, and it is
+in the suite anyway: it is the *same algorithm* in a different
+representation, so it differences 51-bit limbs against Python integers. A
+real check on the field arithmetic in this context, and no check at all on
+whether the ladder is the right ladder -- if the pseudocode had been copied
+wrongly, this oracle would agree enthusiastically while the two above would
+not.
+
+```
+ok - x25519_base == [k]B on the EDWARDS curve mapped through u = (1+y)/(1-y),
+     on 44 scalars -- a different curve form, a different algorithm
+ok - Diffie-Hellman agrees on 10/10 key pairs, which needs no reference
+     implementation at all
+ok - the ladder == the RFC 7748 pseudocode in Python on 26 products,
+     including u = 0, 1, p-1, p and p+1
+ok - 518 Wycheproof XDH vectors agree (254 acceptable: twist points,
+     low-order and non-canonical keys, all with an expected answer)
+```
+
+### There is no input validation, and none is required
+
+Half of all `u` values put the point on the twist rather than on
+Curve25519, and RFC 7748 defines X25519 on every 32-byte string anyway: the
+ladder computes in a group either way and the result is still safe to use.
+That is why **221 of Wycheproof's vectors here are twist points** marked
+`acceptable` with an expected answer, and why none of the 518 is marked
+invalid. A low-order `u` gives an all-zero shared secret rather than an
+error; rejecting that is optional in RFC 7748, is not done here, and is
+called out in the header as the caller's decision.
+
+### A surviving mutant, which is the clamp's fault
+
+RFC 7748's pseudocode ends the ladder with a conditional swap. **Deleting
+it changes no output.** The loop's last iteration sets the swap flag to bit
+0 of the scalar, and `decodeScalar25519` has just cleared the three low
+bits -- so that swap can never fire.
+
+It is kept: it is what the RFC says, it makes the ladder correct for an
+unclamped scalar too, and it costs two branches that are never taken. The
+mutant is recorded as surviving rather than chased, and the suite asserts
+the premise that makes it equivalent -- that the clamp really does clear
+those bits -- because the claim is only true while that holds.
 
 ## Three decisions in the signature, not transcription
 
@@ -152,8 +221,10 @@ twelve rejected on length before they reach the implementation. The suite
 records them separately rather than counting them as verify results,
 because that is the harness refusing and not the code under test.
 
-**No X25519**, despite the file header mentioning RFC 7748. The Wycheproof
-XDH vectors are on disk (518 tests) and nothing reads them.
+**X25519 does no input validation and does not reject an all-zero shared
+secret.** Both are permitted by RFC 7748 and both are the caller's
+decision; a Diffie-Hellman caller that needs contributory behaviour has to
+check the output itself.
 
 **Only the pure Ed25519 variant.** No Ed25519ph, no Ed25519ctx, no
 prehashing, and no batch verification.

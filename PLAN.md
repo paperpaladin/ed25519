@@ -19,6 +19,8 @@ ed25519 ge  OP ...        group operations on the curve
 ed25519 keygen SEED      the public key for a 32-byte seed
 ed25519 sign SEED MSG    a signature, or "-" for an empty message
 ed25519 verify PK MSG SIG   1 if the signature is good, 0 if not
+ed25519 x25519 K U       X25519, RFC 7748
+ed25519 x25519base K     the same against u = 9
 ```
 
 The CLI exists for the differential harness: every internal layer is
@@ -214,11 +216,43 @@ harder to difference against Python.
       found: both skip paths were tested by making them happen -- moving
             the file away, and putting the XDH file in its place. An
             untested skip is a test that passes for the wrong reason.
-- [ ] 06 X25519 (RFC 7748), and its own Wycheproof vectors (518 tests,
-      already downloaded as `scratch/wp_x.json`)
-      why: the header already claims X25519 and nothing implements it. The
-           Montgomery ladder shares the field arithmetic already
-           differenced above, so the new surface is small.
+- [x] 06 X25519 (RFC 7748), and its own Wycheproof vectors
+      why: the header already claimed X25519 and nothing implemented it.
+           The Montgomery ladder shares the field arithmetic already
+           differenced, so the new surface was small.
+      done: the ladder from RFC 7748 section 5, x-only, so no point
+            decoding, no square root and no sign bit. fe_muls stopped being
+            harness-only in the process -- the ladder needs a24*E, which is
+            exactly what it was for, so its ED25519_CLI guard came off.
+      proves: THREE oracles, and they are not equally independent, which is
+            the part worth stating:
+              the birational map   u = (1+y)/(1-y), so [k]B on the EDWARDS
+                                   curve reaches the same point by a
+                                   different algorithm. 44 scalars.
+              DH agreement         X25519(a, base(b)) == X25519(b, base(a)),
+                                   which needs no reference at all.
+              the pseudocode       transcribed into Python. The WEAK one:
+                                   same algorithm, so it checks the limbs
+                                   and not the ladder. In the suite anyway,
+                                   and labelled.
+            All 518 Wycheproof XDH vectors agree on the first run.
+      note: no input validation, and none is required. Half of all u values
+            are on the twist, RFC 7748 defines X25519 on every 32-byte
+            string, and 221 of Wycheproof's vectors here are twist points
+            marked "acceptable" with an expected answer. None of the 518 is
+            invalid. A low-order u gives an all-zero secret rather than an
+            error; rejecting it is optional and is the caller's decision.
+      survived: deleting the ladder's CLOSING conditional swap changes no
+            output, and the mutant is equivalent rather than the test being
+            weak. The loop's last iteration sets the swap flag to bit 0 of
+            the scalar and decodeScalar25519 has just cleared the three low
+            bits, so it can never fire. Kept -- it is what the RFC says and
+            makes the ladder correct for an unclamped scalar -- and the
+            suite now asserts the premise that makes the mutant equivalent,
+            because the claim holds only while the clamp does.
+      found: three other mutations are caught by all three oracles at once:
+            a24 off by one, no clamp, and a ladder one bit short. The
+            Edwards-map oracle and Wycheproof both name a first-bad case.
 - [ ] 07 the fast scalar reduction, against the long division as oracle
       why: item 02 deliberately chose the slow obvious version and said the
            fast one could come later measured against it. This is later.

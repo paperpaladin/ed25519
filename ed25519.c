@@ -300,14 +300,6 @@ static void fe_mul(fe h, const fe f, const fe g)
 
 static void fe_sq(fe h, const fe f) { fe_mul(h, f, f); }
 
-/* Reachable only from the CLI, which is the differential harness. The
- * library does not use fe_muls, and -Wunused-function is right to say so --
- * it exists so that layer can be differenced from outside, which is this
- * project's hard invariant. Guarded rather than deleted, and guarded
- * rather than left to warn, because a build that always warns is a build
- * whose warnings nobody reads.
- */
-#ifdef ED25519_CLI
 static void fe_muls(fe h, const fe f, uint64_t s)
 {
 	fe c;
@@ -315,7 +307,6 @@ static void fe_muls(fe h, const fe f, uint64_t s)
 	c[0] = s;
 	fe_mul(h, f, c);
 }
-#endif
 
 /* Canonical 32-byte little-endian encoding: the unique representative in
  * [0, p). */
@@ -943,6 +934,117 @@ int ed25519_verify(const unsigned char sig[64], const void *msg, size_t len,
 }
 
 /* ===================================================================== *
+ * X25519: RFC 7748 section 5, the Montgomery form of the same curve.
+ *
+ * Curve25519 is v^2 = u^3 + 486662*u^2 + u, birationally equivalent to the
+ * twisted Edwards curve above -- the same group, in coordinates that make
+ * a different operation cheap.  Nothing from the Edwards side is reused
+ * here except the field arithmetic, which is the point: the ladder is
+ * x-only, so it needs no point decoding, no square root and no sign bit,
+ * and it works on inputs that are not on the curve at all.
+ *
+ * THAT LAST PROPERTY IS NOT A BUG.  Half of all u values put the point on
+ * the twist rather than on Curve25519, and RFC 7748 defines X25519 on
+ * every 32-byte string anyway: the ladder computes in a group either way
+ * and the result is still safe to use, which is why there is no input
+ * validation and why 221 of Project Wycheproof's vectors for this are
+ * twist points marked "acceptable" with an expected answer.
+ *
+ * Not constant-time, like everything else here: the conditional swap is
+ * written as a branch rather than as arithmetic, so the scalar's bits are
+ * visible in the timing.
+ * ===================================================================== */
+
+/* (486662 - 2) / 4, the constant the ladder needs rather than A itself. */
+#define X25519_A24 121665
+
+static void fe_cswap(fe f, fe g, int swap)
+{
+	if (swap) {
+		fe t;
+		fe_copy(t, f);
+		fe_copy(f, g);
+		fe_copy(g, t);
+	}
+}
+
+void x25519(unsigned char out[32], const unsigned char k[32],
+	    const unsigned char u[32])
+{
+	fe x1, x2, z2, x3, z3, a, aa, b, bb, e, c, d, da, cb, t;
+	unsigned char kc[32];
+	int bit, swap = 0;
+
+	/* RFC 7748 decodeScalar25519: the three low bits go so the scalar is
+	 * a multiple of the cofactor, and the top two pin its length. */
+	memcpy(kc, k, 32);
+	kc[0] = (unsigned char)(kc[0] & 248);
+	kc[31] = (unsigned char)(kc[31] & 127);
+	kc[31] = (unsigned char)(kc[31] | 64);
+
+	/* decodeUCoordinate masks bit 255, which fe_frombytes already does. */
+	fe_frombytes(x1, u);
+	fe_1(x2);
+	fe_0(z2);
+	fe_copy(x3, x1);
+	fe_1(z3);
+
+	for (bit = 254; bit >= 0; bit--) {
+		int kt = (kc[bit >> 3] >> (bit & 7)) & 1;
+
+		swap ^= kt;
+		fe_cswap(x2, x3, swap);
+		fe_cswap(z2, z3, swap);
+		swap = kt;
+
+		fe_add(a, x2, z2);
+		fe_sq(aa, a);
+		fe_sub(b, x2, z2);
+		fe_sq(bb, b);
+		fe_sub(e, aa, bb);
+		fe_add(c, x3, z3);
+		fe_sub(d, x3, z3);
+		fe_mul(da, d, a);
+		fe_mul(cb, c, b);
+		fe_add(t, da, cb);
+		fe_sq(x3, t);
+		fe_sub(t, da, cb);
+		fe_sq(t, t);
+		fe_mul(z3, x1, t);
+		fe_mul(x2, aa, bb);
+		fe_muls(t, e, X25519_A24);
+		fe_add(t, aa, t);
+		fe_mul(z2, e, t);
+	}
+	/* RFC 7748's pseudocode ends with this swap, and under the clamp
+	 * above it is a no-op EVERY TIME: the loop's last iteration sets
+	 * swap to bit 0 of the scalar, and decodeScalar25519 has just
+	 * cleared the three low bits.  Deleting it changes no output, which
+	 * the suite confirms by trying -- it is recorded as a surviving
+	 * mutant rather than chased.
+	 *
+	 * Kept anyway. It is what the RFC says, the ladder is then correct
+	 * for an unclamped scalar as well, and the cost is two branches that
+	 * are never taken. */
+	fe_cswap(x2, x3, swap);
+	fe_cswap(z2, z3, swap);
+
+	fe_invert(z2, z2);
+	fe_mul(x2, x2, z2);
+	fe_tobytes(out, x2);
+}
+
+/* The base point is u = 9, which is the whole of RFC 7748's generator. */
+void x25519_base(unsigned char out[32], const unsigned char k[32])
+{
+	unsigned char nine[32];
+
+	memset(nine, 0, 32);
+	nine[0] = 9;
+	x25519(out, k, nine);
+}
+
+/* ===================================================================== *
  * CLI.  Everything is driven through this: there is no separate C test
  * program.  `ed25519 OP ARGS...` does one operation; `ed25519 run` reads
  * one such command per line from stdin and prints one result line per
@@ -1231,6 +1333,28 @@ static void docmd(int argc, char **argv)
 	}
 	if (!strcmp(argv[0], "fe") && argc >= 3) {
 		cmd_fe(argc, argv);
+		return;
+	}
+	if (!strcmp(argv[0], "x25519") && argc == 3) {
+		unsigned char k[32], u[32], r[32];
+		if (!arg32(argv[1], k) || !arg32(argv[2], u)) {
+			puts("ERR hex");
+			return;
+		}
+		x25519(r, k, u);
+		puthex(r, 32);
+		putchar('\n');
+		return;
+	}
+	if (!strcmp(argv[0], "x25519base") && argc == 2) {
+		unsigned char k[32], r[32];
+		if (!arg32(argv[1], k)) {
+			puts("ERR hex");
+			return;
+		}
+		x25519_base(r, k);
+		puthex(r, 32);
+		putchar('\n');
 		return;
 	}
 	if (!strcmp(argv[0], "keygen") && argc == 2) {
