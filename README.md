@@ -140,11 +140,21 @@ it changes no output.** The loop's last iteration sets the swap flag to bit
 0 of the scalar, and `decodeScalar25519` has just cleared the three low
 bits -- so that swap can never fire.
 
-It is kept: it is what the RFC says, it makes the ladder correct for an
-unclamped scalar too, and it costs two branches that are never taken. The
-mutant is recorded as surviving rather than chased, and the suite asserts
-the premise that makes it equivalent -- that the clamp really does clear
-those bits -- because the claim is only true while that holds.
+It is kept: it is what the RFC says, it makes the ladder correct for a
+scalar below `2^255` with the clamp removed, and it costs two branches that
+are never taken. The mutant is recorded as surviving rather than chased.
+
+The suite asserts the premise that makes it equivalent, and **the first
+version of that assertion was itself a tautology** -- it computed
+`(k[0] & 248) & 7` in Python, asserted the answer was zero, and never
+touched the binary at all. True of every byte, and it would have passed
+with the implementation deleted. It was also the only thing holding up the
+equivalent-mutant claim above.
+
+It now goes through the binary the way it should have: flip the three low
+bits and the top two of each scalar and require the answer not to move,
+which is what "the clamp discards them" actually means. Deleting the low-bit
+mask turns it red.
 
 ## Three decisions in the signature, not transcription
 
@@ -191,25 +201,41 @@ Then the replacement was measured instead of written:
 
 ```
 $ make bench
-  sign                         466 us
-  verify                       517 us
-  keygen = 1 scalarmult        214 us
-  x25519_base = 1 ladder       160 us
+  sign                         462 us
+  verify                       494 us
+  keygen = 1 scalarmult        217 us
+  x25519_base = 1 ladder       163 us
   sc_muladd                     17 us
-  sc_reduce of 64 bytes          2 us
-  sha512 of 32 bytes             3 us
+  sc_reduce of 64 bytes         16 us
+  sha512 of 32 bytes             4 us
 
-A signature is two scalar multiplications plus two hashes plus
-one muladd.  Of its 466 us:
-   91.7%  two scalar multiplications (427 us)
-    4.1%  all the scalar arithmetic (19 us)
+A signature is two scalar multiplications, two hashes, two
+reductions and one muladd.  Of its 462 us:
+   94.2%  two scalar multiplications (435 us)
+   10.7%  all the scalar arithmetic (49 us: one muladd and
+           two reductions)
 ```
 
-A perfect reduction buys four percent of a signature in exchange for a page
-of unreadable constants, in a repository whose stated non-goal is speed. The
-item is closed as rejected, with the measurement as the reason, and the
-thing the measurement points at -- a windowed scalar multiplication -- is
-queued behind "if anything ever needs this faster than 466 us".
+A perfect reduction buys eleven percent of a signature in exchange for a
+page of unreadable constants, in a repository whose stated non-goal is
+speed. The item is closed as rejected, with the measurement as the reason,
+and the thing the measurement points at -- a windowed scalar multiplication
+-- is queued behind "if anything ever needs this faster than 462 us".
+
+### That benchmark was wrong twice, and the second time was mine
+
+The first version of `make bench` ran `./ed25519 bench`, a CLI op that was
+never written: it printed `ERR unknown` and exited 0, so the target looked
+like it worked. Replacing it introduced the same defect one layer down --
+the new script timed `sc reduce64`, which is also not an op, so the
+"2 us" above was the cost of printing `ERR sc op` rather than the cost of a
+reduction. It also counted one reduction where a signature performs two,
+for `r` and for `k`.
+
+So the figure that closed PLAN item 07 was 4.1% when the honest answer is
+10.7% -- wrong by a factor of nearly three. **The decision survives and the
+number did not**, which is the only reason this is a correction rather than
+a reopening: 94% against 11% says the same thing 92% against 4% did.
 
 
 
@@ -234,7 +260,7 @@ without it that section **skips**, and the skip is counted and printed
 separately from the passes:
 
 ```
-29 passed, 0 failed, 1 SKIPPED
+35 passed, 0 failed, 1 SKIPPED
   skipped: Wycheproof EDDSA vectors absent (scratch/wp_ed.json); ...
 ```
 

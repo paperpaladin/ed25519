@@ -741,14 +741,27 @@ def sec_x25519(exe):
     # because the code relies on it to call that swap dead, and because a
     # mutation that deletes the swap survives -- correctly, as an
     # equivalent mutant, which is only true while this holds.
-    lowbits = []
+    # Through the BINARY, because the first version of this did not touch
+    # it: it computed `(k[0] & 248) & 7` in Python and asserted the result
+    # was zero, which is true of every byte and would pass with ed25519.c
+    # deleted. It was also the assertion the README cited to underwrite the
+    # equivalent-mutant claim, so the one thing holding that claim up was a
+    # tautology.
+    #
+    # What has to be true is that the implementation IGNORES the bits the
+    # clamp discards. So: flip the three low bits and the top two, and the
+    # answer must not move. If it does, the clamp is not doing what the
+    # dead closing swap depends on.
+    cmds, want = [], []
     for k in keys:
-        kc = bytearray(k)
-        kc[0] &= 248
-        if kc[0] & 7:
-            lowbits.append(k.hex())
-    ok(not lowbits, "the clamp clears the three low bits of every scalar, "
-       "so the ladder's closing conditional swap can never fire")
+        flipped = bytes([k[0] ^ 0x07]) + k[1:31] + bytes([k[31] ^ 0xc0])
+        cmds.append("x25519base " + k.hex())
+        cmds.append("x25519base " + flipped.hex())
+    got = batch(exe, cmds)
+    moved = [i for i in range(0, len(cmds), 2) if got[i] != got[i + 1]]
+    ok(not moved, "the clamp discards the three low bits and the top two: "
+       "flipping them changes no answer, on %d scalars -- which is what "
+       "makes the ladder's closing swap dead code" % len(keys))
 
     # A low-order u gives an all-zero shared secret. RFC 7748 makes
     # rejecting that optional and this does not reject it, so the value is

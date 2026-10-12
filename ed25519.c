@@ -480,10 +480,12 @@ static void sc_sub_l(unsigned char s[32])
  * the 32-byte accumulator never overflows -- that is the only bound this
  * needs, and it is the reason the loop is this short.
  *
- * shortcut: 8*len iterations each walking 32 bytes.  About 25 us for a
- * 64-byte digest, against the ~1 ms a signature already spends in the
- * scalar multiplication, so it is under 3% of signing and invisible in
- * verification.  The fast way is Barrett reduction over 21-bit limbs, which
+ * shortcut: 8*len iterations each walking 32 bytes.  Measured by
+ * `make bench` at about 16 us for a 64-byte digest, against the 435 us a
+ * signature spends in its two scalar multiplications.  A signature does
+ * two of these, so the reductions are roughly 7% of signing and the whole
+ * scalar arithmetic about 11%.  (This comment said "under 3%" and "~1 ms"
+ * before the benchmark was fixed to call a CLI op that exists.)  The fast way is Barrett reduction over 21-bit limbs, which
  * is what ref10's sc_reduce does in 200 lines of derived constants; those
  * constants are the kind of thing that is wrong in one limb and passes
  * every test that does not happen to carry into it.  This version has no

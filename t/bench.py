@@ -55,7 +55,13 @@ def main():
         ("keygen = 1 scalarmult", ["keygen %s" % s for s in seeds]),
         ("x25519_base = 1 ladder", ["x25519base %s" % s for s in seeds]),
         ("sc_muladd", ["sc muladd %s %s %s" % (s, s, s) for s in seeds]),
-        ("sc_reduce of 64 bytes", ["sc reduce64 %s%s" % (s, s)
+        # `sc reduce`, not `sc reduce64`: there is no reduce64 op, and the
+        # first version of this timed `puts("ERR sc op")` at 2.7 us instead
+        # of the reduction at 17.5. That number then went into the README
+        # and into the rejection of PLAN item 07 -- the same failure this
+        # file was written to fix one layer down, since `make bench` used to
+        # invoke a `bench` op that was never written either.
+        ("sc_reduce of 64 bytes", ["sc reduce %s%s" % (s, s)
                                    for s in seeds]),
         ("sha512 of 32 bytes", ["sha512 %s" % s for s in seeds]),
     ]
@@ -77,14 +83,18 @@ def main():
 
     sign = times["sign"]
     mult = times["keygen = 1 scalarmult"]
-    scal = times["sc_muladd"] + times["sc_reduce of 64 bytes"]
+    # TWO reductions, not one: signing reduces H(prefix||M) to get r and
+    # H(R||A||M) to get k. Counting one understated the scalar arithmetic
+    # by a reduction, which is most of it.
+    scal = times["sc_muladd"] + 2 * times["sc_reduce of 64 bytes"]
     print()
-    print("A signature is two scalar multiplications plus two hashes plus")
-    print("one muladd.  Of its %.0f us:" % sign)
+    print("A signature is two scalar multiplications, two hashes, two")
+    print("reductions and one muladd.  Of its %.0f us:" % sign)
     print("  %5.1f%%  two scalar multiplications (%.0f us)"
           % (200.0 * mult / sign, 2 * mult))
-    print("  %5.1f%%  all the scalar arithmetic (%.0f us)"
+    print("  %5.1f%%  all the scalar arithmetic (%.0f us: one muladd and"
           % (100.0 * scal / sign, scal))
+    print("           two reductions)")
     print()
     print("Which is the answer to PLAN item 07.  Replacing the long-division")
     print("reduction with a fast one can save at most the second number, and")

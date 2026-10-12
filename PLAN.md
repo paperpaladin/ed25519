@@ -242,6 +242,15 @@ harder to difference against Python.
             marked "acceptable" with an expected answer. None of the 518 is
             invalid. A low-order u gives an all-zero secret rather than an
             error; rejecting it is optional and is the caller's decision.
+      found: the assertion underwriting the equivalent mutant below was a
+            TAUTOLOGY. It computed (k[0] & 248) & 7 in Python, asserted the
+            result was zero -- true of every byte -- and never invoked the
+            binary. It would have passed with ed25519.c deleted, and it was
+            the only thing holding the equivalence claim up. It now flips
+            the three low bits and the top two of each scalar through the
+            CLI and requires the answer not to move, which is what "the
+            clamp discards them" means; deleting the low-bit mask turns it
+            red.
       survived: deleting the ladder's CLOSING conditional swap changes no
             output, and the mutant is equivalent rather than the test being
             weak. The loop's last iteration sets the swap flag to bit 0 of
@@ -263,16 +272,26 @@ harder to difference against Python.
            optimised the wrong thing. `make bench` measures where a
            signature's time goes, and the answer is not ambiguous:
 
-             sign                         466 us
-             keygen = 1 scalarmult        214 us
+             sign                         462 us
+             keygen = 1 scalarmult        217 us
              sc_muladd                     17 us
-             sc_reduce of 64 bytes          2 us
+             sc_reduce of 64 bytes         16 us
 
-           A signature is two scalar multiplications plus two hashes plus
-           one muladd. The two multiplications are 92% of it and ALL the
-           scalar arithmetic is 4%. A perfect reduction saves four percent
-           of a signature in exchange for a page of constants nobody can
-           read, in a repository whose stated non-goal is speed.
+           A signature is two scalar multiplications, two hashes, two
+           reductions and one muladd. The two multiplications are 94% of it
+           and ALL the scalar arithmetic is 11%. A perfect reduction saves
+           eleven percent of a signature in exchange for a page of
+           constants nobody can read, in a repository whose stated non-goal
+           is speed.
+      found: THE BENCHMARK WAS WRONG, and it was wrong in the same way the
+           target it replaced was wrong. The first version timed
+           `sc reduce64`, which is not a CLI op -- so the 2 us above was
+           the cost of printing "ERR sc op" -- and it counted one reduction
+           where a signature performs two. The figure that closed this item
+           was 4.1% when the honest answer is 10.7%, wrong by nearly three
+           times. The decision stands on 94 against 11 exactly as it stood
+           on 92 against 4, which is the only reason this is a correction
+           and not a reopening.
       done: the measurement, not the optimisation. t/bench.py and
             `make bench`, so the claim is reproducible rather than a number
             in a commit message. Item 08 is what the measurement says to do
