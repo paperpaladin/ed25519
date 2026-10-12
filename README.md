@@ -179,7 +179,39 @@ independently: the differential constructs `S + L` for 25 signatures and
 requires a rejection, and Wycheproof's 8 `SignatureMalleability` vectors
 require the same. Deleting the one `if` turns both red.
 
-## Scalars by long division, on purpose
+## Scalars by long division, and a planned optimisation that was measured away
+
+Reduction mod `L` the fast way -- Barrett, or Montgomery -- is a page of
+magic constants that cannot be checked by reading. This does long division
+instead: slow, and obviously right. The plan said the fast version could
+replace it later with this one as its oracle, which is the only order that
+makes the replacement checkable.
+
+Then the replacement was measured instead of written:
+
+```
+$ make bench
+  sign                         466 us
+  verify                       517 us
+  keygen = 1 scalarmult        214 us
+  x25519_base = 1 ladder       160 us
+  sc_muladd                     17 us
+  sc_reduce of 64 bytes          2 us
+  sha512 of 32 bytes             3 us
+
+A signature is two scalar multiplications plus two hashes plus
+one muladd.  Of its 466 us:
+   91.7%  two scalar multiplications (427 us)
+    4.1%  all the scalar arithmetic (19 us)
+```
+
+A perfect reduction buys four percent of a signature in exchange for a page
+of unreadable constants, in a repository whose stated non-goal is speed. The
+item is closed as rejected, with the measurement as the reason, and the
+thing the measurement points at -- a windowed scalar multiplication -- is
+queued behind "if anything ever needs this faster than 466 us".
+
+
 
 Reduction mod L the fast way -- Barrett, or Montgomery -- is a page of magic
 constants that cannot be checked by reading. This does long division

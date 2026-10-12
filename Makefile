@@ -34,9 +34,20 @@ test-asan:
 	CC='$(CC)' CFLAGS='$(ASAN)' UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
 		./t/run.sh
 
+# Where the time in a signature actually goes. This target existed and was
+# broken: it invoked `./ed25519 bench`, a CLI op that was never written, so
+# it printed "ERR unknown" and exited 0. It now runs the measurement that
+# answers PLAN item 07 -- the scalar multiplication is most of a signature
+# and the scalar arithmetic is a few percent of it.
 bench: all
-	./ed25519 bench
+	@python3 t/bench.py ./ed25519
 
+# scratch/ holds BOTH build output and downloaded test vectors, and
+# `rm -rf scratch` threw away the vectors along with the binaries -- after
+# which the suite skips the Wycheproof sections and still reports 0 failed.
+# A clean that quietly reduces what the next test run checks is worse than
+# no clean. The vectors cannot be regenerated locally, so they stay.
 clean:
 	rm -f ed25519.o ed25519
-	rm -rf scratch
+	rm -f scratch/ed25519 scratch/*.log
+	@echo "clean: kept scratch/*.json (downloaded test vectors)"

@@ -253,9 +253,64 @@ harder to difference against Python.
       found: three other mutations are caught by all three oracles at once:
             a24 off by one, no clamp, and a ladder one bit short. The
             Edwards-map oracle and Wycheproof both name a first-bad case.
-- [ ] 07 the fast scalar reduction, against the long division as oracle
-      why: item 02 deliberately chose the slow obvious version and said the
-           fast one could come later measured against it. This is later.
+- [x] 07 REJECTED by measurement: the fast scalar reduction is not worth
+      writing
+      why it was queued: item 02 deliberately chose long division over
+           Barrett or Montgomery because the fast way is a page of magic
+           constants that cannot be checked by reading, and said the fast
+           one could come later with the slow one as its oracle.
+      why it is rejected: the reasoning was sound and the item still
+           optimised the wrong thing. `make bench` measures where a
+           signature's time goes, and the answer is not ambiguous:
+
+             sign                         466 us
+             keygen = 1 scalarmult        214 us
+             sc_muladd                     17 us
+             sc_reduce of 64 bytes          2 us
+
+           A signature is two scalar multiplications plus two hashes plus
+           one muladd. The two multiplications are 92% of it and ALL the
+           scalar arithmetic is 4%. A perfect reduction saves four percent
+           of a signature in exchange for a page of constants nobody can
+           read, in a repository whose stated non-goal is speed.
+      done: the measurement, not the optimisation. t/bench.py and
+            `make bench`, so the claim is reproducible rather than a number
+            in a commit message. Item 08 is what the measurement says to do
+            instead, if anything.
+      found: `make bench` already existed and was broken. It ran
+            `./ed25519 bench`, a CLI op that was never written, so it
+            printed "ERR unknown" and exited 0 -- a target that looked like
+            it worked. Another artefact of the interrupted session.
+      found: `make clean` deleted the downloaded test vectors. It did
+            `rm -rf scratch`, and scratch/ holds both build output and the
+            Wycheproof JSON, so cleaning silently removed the vectors --
+            after which the suite skips both Wycheproof sections and still
+            reports 0 failed. A clean that quietly reduces what the next
+            test run checks is worse than no clean. It now removes the
+            binary and the logs and says what it kept.
+
+### Later
+
+- [ ] 08 a windowed scalar multiplication, against the double-and-add
+      why: this is where the time is, and item 07 is the measurement that
+           says so -- 92% of a signature against the 4% a faster reduction
+           could touch. A fixed-window method with a table of multiples of
+           the base point is the usual approach. The double-and-add stays
+           as its oracle, which is the only order in which the replacement
+           is checkable.
+      note: only worth doing at all if something needs signing to be
+           faster than 466 us. Nothing here does, so this is queued rather
+           than next.
+- [ ] 09 Ed25519ph and Ed25519ctx
+      why: RFC 8032 defines three variants and this implements one. The
+           other two change only the dom2 prefix fed to the hash, so the
+           surface is small -- and Wycheproof has vectors for them, which
+           means the oracle already exists.
+- [ ] 10 a streaming signing API
+      why: a message currently has to fit in memory. Ed25519 hashes the
+           message twice, so streaming needs the caller to present it
+           twice or needs the hash state saved -- which is the design
+           question, and the reason this is not just a loop.
 
 ## Open questions
 
