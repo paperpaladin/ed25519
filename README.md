@@ -142,6 +142,16 @@ project exists not to have. The section also checks the file is the EDDSA
 set and skips if it is not -- the XDH set is a different file with the same
 shape, and it was sitting in the same directory.
 
+**`ed25519_verify` does not check the signature length, because it cannot.**
+It takes `const unsigned char sig[64]` and has no way to know how many bytes
+were offered, so it will verify the first 64 bytes of a 96-byte blob and
+report success. Checking the length is the caller's job and the header says
+so. Twelve of Wycheproof's vectors are exactly that shape -- truncated,
+padded, public key appended -- all twelve expected to be rejected, and all
+twelve rejected on length before they reach the implementation. The suite
+records them separately rather than counting them as verify results,
+because that is the harness refusing and not the code under test.
+
 **No X25519**, despite the file header mentioning RFC 7748. The Wycheproof
 XDH vectors are on disk (518 tests) and nothing reads them.
 

@@ -34,7 +34,15 @@ void ed25519_sign(unsigned char sig[64], const void *msg, size_t len,
 
 /* 0 if the signature is good, -1 otherwise.  Refuses an unreduced S and
  * any non-canonical point encoding, and uses the cofactorless equation
- * [S]B == R + [k]A that RFC 8032 5.1.7 specifies. */
+ * [S]B == R + [k]A that RFC 8032 5.1.7 specifies.
+ *
+ * THE CALLER MUST CHECK THE LENGTH.  This reads exactly 64 bytes and has
+ * no way to know how many were offered, so a signature that arrived
+ * truncated, padded, or with anything appended is this function's caller's
+ * problem -- it will happily verify the first 64 bytes of a 96-byte blob
+ * and report success.  Project Wycheproof devotes twelve vectors to that
+ * shape, every one of them expected to be rejected, and all twelve are
+ * rejected by length before reaching here. */
 int ed25519_verify(const unsigned char sig[64], const void *msg, size_t len,
 		   const unsigned char pk[32]);
 
