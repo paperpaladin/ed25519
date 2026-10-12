@@ -380,6 +380,58 @@ def sec_ge(exe):
             cmds[bad[0]], got[bad[0]], want2[bad[0]])
     ok(not bad, msg)
 
+    # Scalar multiplication: the primitive a signature is built on, and
+    # the one this file could already compute before the C could -- ref_mul
+    # has been here since the group went in, so the oracle for it existed
+    # before the implementation did.
+    #
+    # Both sides run the full 256 bits of the scalar with no reduction, so
+    # scalars at and past L are meaningful inputs rather than errors: the
+    # reduction is the caller's job in RFC 8032 and doing it here would
+    # hide a scalarmult that silently reduced.
+    rnd = random.Random(11)
+    sm_cmds, sm_want = [], []
+    scalars = ([0, 1, 2, 8, L - 1, L, L + 1, 2**252, 2**255, 2**256 - 1]
+               + [rnd.randrange(2**256) for _ in range(40)])
+    for sc in scalars:
+        one2 = leb(sc).hex()
+        sm_cmds.append("ge basemul " + one2)
+        sm_want.append(ref_encode(ref_mul(sc % 2**256, REF_B)).hex())
+    for b in allpts[:40]:
+        r = ref_decode(b)
+        sc = leb(rnd.randrange(2**256)).hex()
+        if r is None:
+            sm_cmds.append("ge mul %s %s" % (b.hex(), sc))
+            sm_want.append("ERR dec")
+            continue
+        w = ref_encode(ref_mul(le(bytes.fromhex(sc)), r)).hex()
+        sm_cmds.append("ge mul %s %s" % (b.hex(), sc))
+        sm_want.append(w)
+        # r and p one object, which a scalarmult that wrote the accumulator
+        # before reading the point would get wrong while passing `mul`.
+        sm_cmds.append("ge selfmul %s %s" % (b.hex(), sc))
+        sm_want.append(w)
+    got = batch(exe, sm_cmds)
+    bad = [i for i in range(len(sm_cmds)) if got[i] != sm_want[i]]
+    msg = ("scalar multiplication == the Python reference on %d products "
+           "(%d scalars against the base point, including 0, 1, L-1, L and "
+           "2^256-1)" % (len(sm_cmds), len(scalars)))
+    if bad:
+        msg += " -- first bad: `%s` -> %s, want %s" % (
+            sm_cmds[bad[0]], got[bad[0]], sm_want[bad[0]])
+    ok(not bad, msg)
+
+    # L*B is the identity, because L is the order of the base point. That is
+    # the one fact about scalar multiplication that does not need a
+    # reference implementation to state, so it is asserted on its own.
+    got = batch(exe, ["ge basemul " + leb(L).hex(),
+                      "ge id " + ref_encode(ref_mul(0, REF_B)).hex(),
+                      "ge basemul " + leb(L + 1).hex()])
+    ok(got[0] == ref_encode((0, 1, 1, 0)).hex(),
+       "L*B is the identity, so B has order L")
+    ok(got[2] == "5866666666666666666666666666666666666666666666666666666666666666",
+       "...and (L+1)*B is B again")
+
     # The non-canonical y values are exactly y in [p, 2^255): nineteen of
     # them, each with either sign bit.  y = p is the worst one, because it
     # is p + 0 and y = 0 is a real point of order 4 -- so a verifier that

@@ -117,6 +117,36 @@ harder to difference against Python.
             encodings are not points and must say so; and every
             non-canonical y in [p, 2^255) is rejected with both sign bits,
             38 of 38.
+- [x] 03a scalar multiplication, which the plan did not have
+      why: it was not an item, and it should have been. Item 04 is keygen,
+           sign and verify, and none of them can be written without s*P --
+           which item 03 did not build, because the group law and the
+           scalar arithmetic are both complete without it. Found by
+           reading the CLI: `ge` had const, dec, id, neg, dbl, add, selfadd
+           and eq, and no multiplication, while t/diff.py had had ref_mul
+           since the group went in. The oracle existed before the
+           implementation; the plan just never named the gap.
+      done: double-and-add over the 256 bits of the scalar, most
+            significant first, with no reduction -- RFC 8032 makes the
+            reduction the caller's job and doing it here would hide a
+            scalarmult that silently reduced. This is the function that
+            makes the whole repository non-constant-time: the addition is
+            skipped when the bit is clear, so the timing and the cache
+            footprint both depend on the private scalar.
+      proves: 127 products against the Python reference, over 50 scalars
+            including 0, 1, 2, 8, L-1, L, L+1, 2^252, 2^255 and 2^256-1,
+            and 40 random points with the aliasing path tested separately.
+            And L*B is the identity, which is the one fact here that needs
+            no reference implementation to state -- so B has order L, and
+            (L+1)*B is B again.
+      found: the edge-case scalar list is what catches a whole mutation
+            class. Dropping the top bit of the scalar -- looping from 254
+            rather than 255 -- is invisible to random 256-bit scalars
+            often enough to matter, and is caught immediately by the
+            2^255 entry. Mutation-tested three ways: reversed bit order
+            within each byte, the unexamined top bit, and doubling after
+            the add instead of before.
+
 - [ ] 04 keygen, sign and verify, against the RFC 8032 section 7.1 vectors
       why: this is the whole point of the repo and it is not done. There is
            no `ed25519_sign` yet -- `ed25519.h` declares only

@@ -680,6 +680,44 @@ static int ge_frombytes(struct ge *p, const unsigned char s[32])
 	return 0;
 }
 
+/* r = s*p, double-and-add over the 256 bits of s, most significant first.
+ *
+ * NOT CONSTANT-TIME, and this is the function that makes that true of the
+ * whole repository: the addition is skipped when the scalar bit is clear,
+ * so both the running time and the cache footprint depend on the private
+ * scalar.  Anything able to measure either can recover the key.  Stated in
+ * ed25519.h and first in the README; repeated here because this is where
+ * it lives rather than where it is described.
+ *
+ * s is little-endian, so bit i is s[i >> 3] >> (i & 7) -- the same bit
+ * order RFC 8032 puts on the wire.
+ *
+ * r may alias p: the point is copied into a local before the accumulator
+ * is written.
+ *
+ * shortcut: a fixed-window method with a precomputed table of multiples of
+ * the base point is the usual speedup, roughly 4x for signing.  The upgrade
+ * path is a table in ge_init and a windowed loop here; the double-and-add
+ * stays as the oracle for it, which is the only order in which that
+ * replacement can be checked.  Signing is about 1 ms and nothing here
+ * needs it faster.
+ */
+static void ge_scalarmult(struct ge *r, const unsigned char s[32],
+			  const struct ge *p)
+{
+	struct ge acc, q;
+	int i;
+
+	ge_identity(&acc);
+	q = *p;
+	for (i = 255; i >= 0; i--) {
+		ge_add(&acc, &acc, &acc);
+		if ((s[i >> 3] >> (i & 7)) & 1)
+			ge_add(&acc, &acc, &q);
+	}
+	*r = acc;
+}
+
 /* Derive d, 2d, sqrt(-1) and the base point from their definitions.
  *
  * shortcut: a lazily initialised global, so this is not thread-safe on the
@@ -928,6 +966,18 @@ static void cmd_ge(int argc, char **argv)
 		putchar('\n');
 		return;
 	}
+	if (!strcmp(op, "basemul") && argc == 3) {
+		/* Before the point decode, because the point is implicit. */
+		if (!arg32(argv[2], qb)) {
+			puts("ERR hex");
+			return;
+		}
+		ge_scalarmult(&r, qb, &GE_B);
+		ge_tobytes(rb, &r);
+		puthex(rb, 32);
+		putchar('\n');
+		return;
+	}
 	if (!arg32(argv[2], pb)) {
 		puts("ERR hex");
 		return;
@@ -962,6 +1012,23 @@ static void cmd_ge(int argc, char **argv)
 			return;
 		}
 		ge_add(&r, &p, &q);
+	} else if (!strcmp(op, "mul") && argc == 4) {
+		/* ge mul POINT SCALAR -- point first, as every other op here. */
+		if (!arg32(argv[3], qb)) {
+			puts("ERR hex");
+			return;
+		}
+		ge_scalarmult(&r, qb, &p);
+	} else if (!strcmp(op, "selfmul") && argc == 4) {
+		/* The aliasing path: r and p are one object.  Separate because
+		 * a scalarmult that wrote the accumulator before reading the
+		 * point would pass `mul` and fail here. */
+		if (!arg32(argv[3], qb)) {
+			puts("ERR hex");
+			return;
+		}
+		r = p;
+		ge_scalarmult(&r, qb, &r);
 	} else if (!strcmp(op, "selfadd")) {
 		/* r = p + p through the aliasing path: r, p and q all one
 		 * object.  Tested separately because a formula that reads a
