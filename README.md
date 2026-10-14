@@ -61,7 +61,7 @@ ok - 139 Wycheproof EDDSA vectors agree (88 valid, 51 invalid; 12 more have
      a signature that is not 64 bytes and are rejected by length alone)
 ```
 
-The constants are the detail worth noticing: they are **derived from their
+The constants are the detail worth noticing. They are **derived from their
 definitions** in the code and then compared against what the RFC prints, so
 a mistyped constant is caught by the document, not by the code
 agreeing with itself.
@@ -103,8 +103,8 @@ Diffie-Hellman agreeing with itself. `X25519(a, X25519(b, 9))` equals
 here that would still mean something if every reference implementation were
 wrong in the same way.
 
-A Python transcription of the ladder. This is the weak one, and it is
-in the suite anyway: it is the *same algorithm* in a different
+A Python transcription of the ladder. This is the weak one and it is
+in the suite anyway, because it is the *same algorithm* in a different
 representation, so it differences 51-bit limbs against Python integers. A
 real check on the field arithmetic in this context, and no check at all on
 whether the ladder is the right ladder, if the pseudocode had been copied
@@ -125,7 +125,7 @@ ok - 518 Wycheproof XDH vectors agree (254 acceptable: twist points,
 ### There is no input validation, and none is required
 
 Half of all `u` values put the point on the twist, not on
-Curve25519, and RFC 7748 defines X25519 on every 32-byte string anyway: the
+Curve25519, and RFC 7748 defines X25519 on every 32-byte string anyway. The
 ladder computes in a group either way and the result is still safe to use.
 That is why 221 of Wycheproof's vectors here are twist points marked
 `acceptable` with an expected answer, and why none of the 518 is marked
@@ -140,7 +140,7 @@ it changes no output.** The loop's last iteration sets the swap flag to bit
 0 of the scalar, and `decodeScalar25519` has just cleared the three low
 bits, so that swap can never fire.
 
-It is kept: it is what the RFC says, it makes the ladder correct for a
+It is kept. It is what the RFC says, it makes the ladder correct for a
 scalar below `2^255` with the clamp removed, and it costs two branches that
 are never taken. The mutant is recorded as surviving, not chased.
 
@@ -164,8 +164,8 @@ which is why "sign, then verify" proves nothing.
 
 Signing takes only the seed. The usual API hands `sign()` both the
 secret scalar and the public key, saving one scalar multiplication per
-signature. It also admits a real attack: a caller who passes a public key
-not derived from the secret gets a signature that verifies under *that*
+signature. It also admits a real attack. A caller who passes a public key not
+derived from the secret gets a signature that verifies under *that*
 key. `A` is recomputed from the seed every time instead. It costs about
 half the price of a signature, and the footgun cannot be loaded.
 
@@ -219,15 +219,15 @@ reductions and one muladd.  Of its 462 us:
 A perfect reduction buys eleven percent of a signature in exchange for a
 page of unreadable constants, in a repository whose stated non-goal is
 speed. The item is closed as rejected, with the measurement as the reason,
-and the thing the measurement points at: a windowed scalar multiplication,
+and the thing the measurement points at, a windowed scalar multiplication,
 is queued behind "if anything ever needs this faster than 462 us".
 
 ### That benchmark was wrong twice, and the second time was mine
 
 The first version of `make bench` ran `./ed25519 bench`, a CLI op that was
 never written: it printed `ERR unknown` and exited 0, so the target looked
-like it worked. Replacing it introduced the same defect one layer down:
-the new script timed `sc reduce64`, also not an op, so the
+like it worked. Replacing it introduced the same defect one layer down.
+The new script timed `sc reduce64`, also not an op, so the
 "2 us" above was the cost of printing `ERR sc op`, not the cost of a
 reduction. It also counted one reduction where a signature performs two,
 for `r` and for `k`.
@@ -237,13 +237,6 @@ So the figure that closed PLAN item 07 was 4.1% when the honest answer is
 number did not**, and that is the only reason this is a correction
 and not a reopening: 94% against 11% says the same thing 92% against 4% did.
 
-
-
-Reduction mod L the fast way (Barrett, or Montgomery) is a page of magic
-constants that cannot be checked by reading. This does long division
-instead: slow, and obviously right. The fast version can replace it later
-with this one as its oracle. No other order makes the replacement
-checkable.
 
 ## What does not work
 
@@ -266,7 +259,7 @@ separately from the passes:
 
 A skipped oracle that reported `ok` would be exactly the kind of test this
 project exists not to have. The section also checks the file is the EDDSA
-set and skips if it is not: the XDH set is a different file with the same
+set and skips if it is not, since the XDH set is a different file with the same
 shape, and it was sitting in the same directory.
 
 `ed25519_verify` does not check the signature length, because it cannot.

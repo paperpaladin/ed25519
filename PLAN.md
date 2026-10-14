@@ -23,7 +23,7 @@ ed25519 x25519 K U       X25519, RFC 7748
 ed25519 x25519base K     the same against u = 9
 ```
 
-The CLI exists for the differential harness: every internal layer is
+The CLI exists for the differential harness. Every internal layer is
 reachable from outside so it can be differenced against an independent
 implementation, not only the top-level signature being testable.
 
