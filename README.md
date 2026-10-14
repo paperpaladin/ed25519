@@ -133,7 +133,7 @@ invalid. A low-order `u` gives an all-zero shared secret, not an
 error. Rejecting that is optional in RFC 7748, is not done here, and is
 called out in the header as the caller's decision.
 
-### A surviving mutant, which is the clamp's fault
+### A surviving mutant, and the clamp's fault
 
 RFC 7748's pseudocode ends the ladder with a conditional swap. **Deleting
 it changes no output.** The loop's last iteration sets the swap flag to bit
@@ -194,8 +194,8 @@ require the same. Deleting the one `if` turns both red.
 Reduction mod `L` the fast way (Barrett, or Montgomery) is a page of
 magic constants that cannot be checked by reading. This does long division
 instead: slow, and obviously right. The plan said the fast version could
-replace it later with this one as its oracle, which is the only order that
-makes the replacement checkable.
+replace it later with this one as its oracle. No other order makes the
+replacement checkable.
 
 Then the replacement was measured instead of written:
 
@@ -227,23 +227,23 @@ is queued behind "if anything ever needs this faster than 462 us".
 The first version of `make bench` ran `./ed25519 bench`, a CLI op that was
 never written: it printed `ERR unknown` and exited 0, so the target looked
 like it worked. Replacing it introduced the same defect one layer down:
-the new script timed `sc reduce64`, which is also not an op, so the
+the new script timed `sc reduce64`, also not an op, so the
 "2 us" above was the cost of printing `ERR sc op`, not the cost of a
 reduction. It also counted one reduction where a signature performs two,
 for `r` and for `k`.
 
 So the figure that closed PLAN item 07 was 4.1% when the honest answer is
 10.7%, wrong by a factor of nearly three. **The decision survives and the
-number did not**, which is the only reason this is a correction,
-not a reopening: 94% against 11% says the same thing 92% against 4% did.
+number did not**, and that is the only reason this is a correction
+and not a reopening: 94% against 11% says the same thing 92% against 4% did.
 
 
 
 Reduction mod L the fast way (Barrett, or Montgomery) is a page of magic
 constants that cannot be checked by reading. This does long division
 instead: slow, and obviously right. The fast version can replace it later
-with this one as its oracle, which is the only order that makes the
-replacement checkable.
+with this one as its oracle. No other order makes the replacement
+checkable.
 
 ## What does not work
 
