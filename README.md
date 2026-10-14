@@ -63,7 +63,7 @@ ok - 139 Wycheproof EDDSA vectors agree (88 valid, 51 invalid; 12 more have
 
 The constants are the detail worth noticing: they are **derived from their
 definitions** in the code and then compared against what the RFC prints, so
-a mistyped constant is caught by the document rather than by the code
+a mistyped constant is caught by the document, not by the code
 agreeing with itself.
 
 ## SHA-512 is vendored, not rewritten
@@ -91,23 +91,23 @@ Which oracle to believe matters more here than anywhere else in this repo,
 because the obvious one is the weakest. In order of how little they share
 with the code:
 
-**The birational map.** RFC 7748 section 4.1 gives the correspondence
+The birational map. RFC 7748 section 4.1 gives the correspondence
 between the two curve forms, `u = (1 + y) / (1 - y)`. So `x25519_base(k)`
-can be computed a second way: take `[clamp(k)]B` on the **Edwards** curve,
+can be computed a second way: take `[clamp(k)]B` on the Edwards curve,
 whose group law is already differenced against Python, and map the `y` that
 comes out. Different coordinates, different formula, different number of
-field operations -- and it agrees on all 44 scalars.
+field operations, and it agrees on all 44 scalars.
 
-**Diffie-Hellman agreeing with itself.** `X25519(a, X25519(b, 9))` equals
+Diffie-Hellman agreeing with itself. `X25519(a, X25519(b, 9))` equals
 `X25519(b, X25519(a, 9))` because both are `[a*b]G`. This is the only check
 here that would still mean something if every reference implementation were
 wrong in the same way.
 
-**A Python transcription of the ladder.** This is the weak one, and it is
+A Python transcription of the ladder. This is the weak one, and it is
 in the suite anyway: it is the *same algorithm* in a different
 representation, so it differences 51-bit limbs against Python integers. A
 real check on the field arithmetic in this context, and no check at all on
-whether the ladder is the right ladder -- if the pseudocode had been copied
+whether the ladder is the right ladder, if the pseudocode had been copied
 wrongly, this oracle would agree enthusiastically while the two above would
 not.
 
@@ -124,13 +124,13 @@ ok - 518 Wycheproof XDH vectors agree (254 acceptable: twist points,
 
 ### There is no input validation, and none is required
 
-Half of all `u` values put the point on the twist rather than on
+Half of all `u` values put the point on the twist, not on
 Curve25519, and RFC 7748 defines X25519 on every 32-byte string anyway: the
 ladder computes in a group either way and the result is still safe to use.
-That is why **221 of Wycheproof's vectors here are twist points** marked
+That is why 221 of Wycheproof's vectors here are twist points marked
 `acceptable` with an expected answer, and why none of the 518 is marked
-invalid. A low-order `u` gives an all-zero shared secret rather than an
-error; rejecting that is optional in RFC 7748, is not done here, and is
+invalid. A low-order `u` gives an all-zero shared secret, not an
+error. Rejecting that is optional in RFC 7748, is not done here, and is
 called out in the header as the caller's decision.
 
 ### A surviving mutant, which is the clamp's fault
@@ -138,14 +138,14 @@ called out in the header as the caller's decision.
 RFC 7748's pseudocode ends the ladder with a conditional swap. **Deleting
 it changes no output.** The loop's last iteration sets the swap flag to bit
 0 of the scalar, and `decodeScalar25519` has just cleared the three low
-bits -- so that swap can never fire.
+bits, so that swap can never fire.
 
 It is kept: it is what the RFC says, it makes the ladder correct for a
 scalar below `2^255` with the clamp removed, and it costs two branches that
-are never taken. The mutant is recorded as surviving rather than chased.
+are never taken. The mutant is recorded as surviving, not chased.
 
 The suite asserts the premise that makes it equivalent, and **the first
-version of that assertion was itself a tautology** -- it computed
+version of that assertion was itself a tautology**, it computed
 `(k[0] & 248) & 7` in Python, asserted the answer was zero, and never
 touched the binary at all. True of every byte, and it would have passed
 with the implementation deleted. It was also the only thing holding up the
@@ -159,24 +159,24 @@ mask turns it red.
 ## Three decisions in the signature, not transcription
 
 Most of RFC 8032 is transcription. Three things are choices, and each is a
-place an implementation can be wrong while passing its own round trip --
+place an implementation can be wrong while passing its own round trip,
 which is why "sign, then verify" proves nothing.
 
-**Signing takes only the seed.** The usual API hands `sign()` both the
+Signing takes only the seed. The usual API hands `sign()` both the
 secret scalar and the public key, saving one scalar multiplication per
 signature. It also admits a real attack: a caller who passes a public key
 not derived from the secret gets a signature that verifies under *that*
 key. `A` is recomputed from the seed every time instead. It costs about
 half the price of a signature, and the footgun cannot be loaded.
 
-**Verification is cofactorless.** `[S]B == R + [k]A`, exactly as RFC 8032
-section 5.1.7 step 3 writes it -- not the cofactored `[8][S]B == [8]R +
+Verification is cofactorless. `[S]B == R + [k]A`, exactly as RFC 8032
+section 5.1.7 step 3 writes it: not the cofactored `[8][S]B == [8]R +
 [8][k]A` that several implementations use. The two disagree on signatures
 with a small-order component, so this is a choice with observable
-consequences rather than an optimisation.
+consequences, not an optimisation.
 
-**Non-canonical encodings are refused.** Any `y` in `[p, 2^255)` is
-rejected rather than reduced mod `p` first, for public keys and for `R`.
+Non-canonical encodings are refused. Any `y` in `[p, 2^255)` is
+rejected, not reduced mod `p` first, for public keys and for `R`.
 That is stricter than several widely used libraries, and the difference is
 visible in the Wycheproof vectors.
 
@@ -191,7 +191,7 @@ require the same. Deleting the one `if` turns both red.
 
 ## Scalars by long division, and a planned optimisation that was measured away
 
-Reduction mod `L` the fast way -- Barrett, or Montgomery -- is a page of
+Reduction mod `L` the fast way (Barrett, or Montgomery) is a page of
 magic constants that cannot be checked by reading. This does long division
 instead: slow, and obviously right. The plan said the fast version could
 replace it later with this one as its oracle, which is the only order that
@@ -219,27 +219,27 @@ reductions and one muladd.  Of its 462 us:
 A perfect reduction buys eleven percent of a signature in exchange for a
 page of unreadable constants, in a repository whose stated non-goal is
 speed. The item is closed as rejected, with the measurement as the reason,
-and the thing the measurement points at -- a windowed scalar multiplication
--- is queued behind "if anything ever needs this faster than 462 us".
+and the thing the measurement points at: a windowed scalar multiplication,
+is queued behind "if anything ever needs this faster than 462 us".
 
 ### That benchmark was wrong twice, and the second time was mine
 
 The first version of `make bench` ran `./ed25519 bench`, a CLI op that was
 never written: it printed `ERR unknown` and exited 0, so the target looked
-like it worked. Replacing it introduced the same defect one layer down --
+like it worked. Replacing it introduced the same defect one layer down:
 the new script timed `sc reduce64`, which is also not an op, so the
-"2 us" above was the cost of printing `ERR sc op` rather than the cost of a
+"2 us" above was the cost of printing `ERR sc op`, not the cost of a
 reduction. It also counted one reduction where a signature performs two,
 for `r` and for `k`.
 
 So the figure that closed PLAN item 07 was 4.1% when the honest answer is
-10.7% -- wrong by a factor of nearly three. **The decision survives and the
-number did not**, which is the only reason this is a correction rather than
-a reopening: 94% against 11% says the same thing 92% against 4% did.
+10.7%, wrong by a factor of nearly three. **The decision survives and the
+number did not**, which is the only reason this is a correction,
+not a reopening: 94% against 11% says the same thing 92% against 4% did.
 
 
 
-Reduction mod L the fast way -- Barrett, or Montgomery -- is a page of magic
+Reduction mod L the fast way (Barrett, or Montgomery) is a page of magic
 constants that cannot be checked by reading. This does long division
 instead: slow, and obviously right. The fast version can replace it later
 with this one as its oracle, which is the only order that makes the
@@ -247,16 +247,16 @@ replacement checkable.
 
 ## What does not work
 
-**Not constant-time, and that is a stated non-goal rather than a to-do.**
+Not constant-time, and that is a stated non-goal, not a to-do.
 `ge_scalarmult` skips the addition when the scalar bit is clear, so both
 the running time and the cache footprint depend on the private scalar. A
 half-hardened implementation invites exactly the use this must not have, so
 it is not half-hardened.
 
-**The Wycheproof vectors are not in the repository.** They are third-party
+The Wycheproof vectors are not in the repository. They are third-party
 data, and vendoring them would mean this project shipping someone else's
 test suite. Put the EDDSA verify set at `scratch/wp_ed.json` and they run;
-without it that section **skips**, and the skip is counted and printed
+without it that section skips, and the skip is counted and printed
 separately from the passes:
 
 ```
@@ -266,28 +266,28 @@ separately from the passes:
 
 A skipped oracle that reported `ok` would be exactly the kind of test this
 project exists not to have. The section also checks the file is the EDDSA
-set and skips if it is not -- the XDH set is a different file with the same
+set and skips if it is not: the XDH set is a different file with the same
 shape, and it was sitting in the same directory.
 
-**`ed25519_verify` does not check the signature length, because it cannot.**
+`ed25519_verify` does not check the signature length, because it cannot.
 It takes `const unsigned char sig[64]` and has no way to know how many bytes
 were offered, so it will verify the first 64 bytes of a 96-byte blob and
 report success. Checking the length is the caller's job and the header says
-so. Twelve of Wycheproof's vectors are exactly that shape -- truncated,
-padded, public key appended -- all twelve expected to be rejected, and all
+so. Twelve of Wycheproof's vectors are exactly that shape, truncated,
+padded, public key appended: all twelve expected to be rejected, and all
 twelve rejected on length before they reach the implementation. The suite
-records them separately rather than counting them as verify results,
+records them separately instead of counting them as verify results,
 because that is the harness refusing and not the code under test.
 
 **X25519 does no input validation and does not reject an all-zero shared
 secret.** Both are permitted by RFC 7748 and both are the caller's
-decision; a Diffie-Hellman caller that needs contributory behaviour has to
+decision. A Diffie-Hellman caller that needs contributory behaviour has to
 check the output itself.
 
-**Only the pure Ed25519 variant.** No Ed25519ph, no Ed25519ctx, no
+Only the pure Ed25519 variant. No Ed25519ph, no Ed25519ctx, no
 prehashing, and no batch verification.
 
-**One message at a time, in memory.** There is no streaming signing API, so
+One message at a time, in memory. There is no streaming signing API, so
 a message has to fit in a buffer.
 
 No other curves, no assembly, no install target, no stable ABI.
