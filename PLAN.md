@@ -141,7 +141,7 @@ harder to difference against Python.
       proves: 127 products against the Python reference, over 50 scalars
             including 0, 1, 2, 8, L-1, L, L+1, 2^252, 2^255 and 2^256-1,
             and 40 random points with the aliasing path tested separately.
-            And L*B is the identity, which is the one fact here that needs
+            And L*B is the identity, the one fact here that needs
             no reference implementation to state, so B has order L, and
             (L+1)*B is B again.
       found: the edge-case scalar list is what catches a whole mutation
@@ -188,7 +188,7 @@ harder to difference against Python.
             the public API reached the fe, sc or ge layers. Implementing
             this consumed most of them; the four that remain, fe_muls,
             fe_eq, ge_isidentity, ge_neg, are reachable only from the
-            CLI, which is the differential harness, so they are now
+            CLI, the differential harness, so they are now
             guarded by ED25519_CLI, not left to warn. A build that
             always warns is a build whose warnings nobody reads.
 - [x] 05 the Wycheproof Ed25519 vectors
@@ -248,7 +248,7 @@ harder to difference against Python.
             binary. It would have passed with ed25519.c deleted, and it was
             the only thing holding the equivalence claim up. It now flips
             the three low bits and the top two of each scalar through the
-            CLI and requires the answer not to move, which is what "the
+            CLI and requires the answer not to move, the thing "the
             clamp discards them" means; deleting the low-bit mask turns it
             red.
       survived: deleting the ladder's CLOSING conditional swap changes no
@@ -285,12 +285,12 @@ harder to difference against Python.
            is speed.
       found: THE BENCHMARK WAS WRONG, and it was wrong in the same way the
            target it replaced was wrong. The first version timed
-           `sc reduce64`, which is not a CLI op, so the 2 us above was
+           `sc reduce64`, no CLI op at all, so the 2 us above was
            the cost of printing "ERR sc op", and it counted one reduction
            where a signature performs two. The figure that closed this item
            was 4.1% when the honest answer is 10.7%, wrong by nearly three
            times. The decision stands on 94 against 11 exactly as it stood
-           on 92 against 4, which is the only reason this is a correction
+           on 92 against 4, and that is the only reason this is a correction
            and not a reopening.
       done: the measurement, not the optimisation. t/bench.py and
             `make bench`, so the claim is reproducible, not a number
@@ -315,7 +315,7 @@ harder to difference against Python.
            says so: 92% of a signature against the 4% a faster reduction
            could touch. A fixed-window method with a table of multiples of
            the base point is the usual approach. The double-and-add stays
-           as its oracle, which is the only order in which the replacement
+           as its oracle, the only order in which the replacement
            is checkable.
       note: only worth doing at all if something needs signing to be
            faster than 466 us. Nothing here does, so this is queued rather
@@ -328,7 +328,7 @@ harder to difference against Python.
 - [ ] 10 a streaming signing API
       why: a message currently has to fit in memory. Ed25519 hashes the
            message twice, so streaming needs the caller to present it
-           twice or needs the hash state saved, which is the design
+           twice or needs the hash state saved, and that is the design
            question, and the reason this is not just a loop.
 
 ## Open questions
@@ -341,6 +341,6 @@ harder to difference against Python.
   Delete the duplicate before either is wired up, so the harness cannot
   silently run the wrong set.
 - Whether to keep the CLI at all once signing exists. It is there so each
-  layer can be differenced from outside, which is the hard invariant, so
+  layer can be differenced from outside, the hard invariant, so
   probably yes, but it is also a public surface that is not part of the
   contract.
