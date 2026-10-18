@@ -560,6 +560,20 @@ static fe GE_D, GE_D2, GE_SQRTM1;
 static struct ge GE_B;
 static int ge_ready;
 
+#ifdef ED25519_CLI
+/* Every ge_add in the process, read and zeroed by `ge adds reset`.
+ *
+ * This is here for a specific vacuous-test hazard.  The windowed base
+ * multiplication is checked against the double-and-add, and that check
+ * passes just as well if `ge wbasemul` quietly calls the double-and-add:
+ * the harness would then be comparing one implementation with itself and
+ * reporting agreement.  The addition count distinguishes them -- 64 for
+ * every scalar against 256 + popcount(s) -- so the suite can assert which
+ * code actually ran, and can assert the same of keygen and sign.  Not
+ * compiled into the library. */
+static unsigned long ge_adds;
+#endif
+
 static void ge_identity(struct ge *p)
 {
 	fe_0(p->X);
@@ -584,6 +598,10 @@ static void ge_identity(struct ge *p)
 static void ge_add(struct ge *r, const struct ge *p, const struct ge *q)
 {
 	fe a, b, c, d, e, f, g, h, t;
+
+#ifdef ED25519_CLI
+	ge_adds++;
+#endif
 
 	fe_sub(t, p->Y, p->X);
 	fe_sub(a, q->Y, q->X);
@@ -724,12 +742,11 @@ static int ge_frombytes(struct ge *p, const unsigned char s[32])
  * r may alias p: the point is copied into a local before the accumulator
  * is written.
  *
- * shortcut: a fixed-window method with a precomputed table of multiples of
- * the base point is the usual speedup, roughly 4x for signing.  The upgrade
- * path is a table in ge_init and a windowed loop here; the double-and-add
- * stays as the oracle for it, which is the only order in which that
- * replacement can be checked.  Signing is about 1 ms and nothing here
- * needs it faster.
+ * Since PLAN item 08 this is no longer what keygen, sign or [S]B in verify
+ * use: ge_basemult below replaced it for the fixed base point, and this
+ * stays as the ORACLE that checks it, which is the only order in which
+ * that replacement is checkable.  It is still the multiplication used for
+ * [k]A in verify, where the point varies and every input is public.
  */
 static void ge_scalarmult(struct ge *r, const unsigned char s[32],
 			  const struct ge *p)
@@ -743,6 +760,114 @@ static void ge_scalarmult(struct ge *r, const unsigned char s[32],
 		ge_add(&acc, &acc, &acc);
 		if ((s[i >> 3] >> (i & 7)) & 1)
 			ge_add(&acc, &acc, &q);
+	}
+	*r = acc;
+}
+
+/* ===================================================================== *
+ * The windowed multiplication by the FIXED base point, PLAN item 08.
+ *
+ * `make bench` says a signature is two [s]B and that they are 87% of it.
+ * Both are by the same point, so the doublings can be done once, at
+ * startup, instead of 256 times per signature: GE_BTAB[i][d] is
+ * [d * 16^i]B, so
+ *
+ *     [s]B = sum over the 64 hex digits d_i of s  of  GE_BTAB[i][d_i]
+ *
+ * is 64 group additions and no doublings at all, against the 256 + popcount
+ * the double-and-add needs.  The table costs 1148 additions once.
+ *
+ * THE TABLE LOOKUP IS CONSTANT TIME.  A windowed method whose table is
+ * indexed by a secret digit is a cache-timing side channel and is the
+ * usual way this optimisation is got wrong, so ge_wselect reads ALL
+ * sixteen entries of the window and picks one arithmetically.  There is no
+ * branch on the scalar and no memory address derived from it, and the
+ * number of group additions is 64 for every scalar, which the suite
+ * asserts by counting them.
+ *
+ * That is a statement about THIS function and nothing more.  It does not
+ * make signing constant time: sc_reduce is long division with a data
+ * dependent subtraction, sc_geq_l returns early, and both run on secrets.
+ * There is no timing harness here, so even the claim above is argued from
+ * the code (no branch, no secret-derived index) and the operation count,
+ * not measured.  The README says all of this where someone will read it.
+ * ===================================================================== */
+
+/* shortcut: 64 * 16 points of 160 bytes is 160 KiB of BSS, and 0 is a
+ * wasted entry in every window.  Signed digits in -8..8 would halve the
+ * table at the cost of a constant-time conditional negate and a recoding
+ * pass; a width of 5 would cut the additions from 64 to 52 but needs 256
+ * to be padded out to 260 bits.  Neither is worth the arithmetic nobody
+ * can check by reading, in a repository whose non-goal is speed. */
+#define GE_W		4			/* window width, in bits */
+#define GE_WDIG		(1 << GE_W)		/* entries per window */
+#define GE_WINDOWS	(256 / GE_W)		/* windows in a scalar */
+
+static struct ge GE_BTAB[GE_WINDOWS][GE_WDIG];
+
+/* f = g where mask is all ones, f unchanged where mask is zero.  No
+ * branch: the caller builds the mask from a comparison done in
+ * arithmetic. */
+static void fe_cmov(fe f, const fe g, uint64_t mask)
+{
+	for (int i = 0; i < 5; i++)
+		f[i] ^= (f[i] ^ g[i]) & mask;
+}
+
+/* r = tab[digit], read by scanning the whole table.  digit is secret, so
+ * tab[digit] must not be written as an index: that is a load whose address
+ * depends on the key and so a cache-timing oracle for it.
+ *
+ * The mask is (i ^ digit) - 1 shifted right 63: i ^ digit is 0 exactly when
+ * they are equal, and 0 - 1 borrows to all ones while 1..15 minus 1 stays
+ * below 2^63. */
+static void ge_wselect(struct ge *r, const struct ge tab[GE_WDIG],
+		       unsigned digit)
+{
+	unsigned i;
+
+	ge_identity(r);
+	for (i = 0; i < GE_WDIG; i++) {
+		uint64_t m = 0 - (((uint64_t)(i ^ digit) - 1) >> 63);
+		fe_cmov(r->X, tab[i].X, m);
+		fe_cmov(r->Y, tab[i].Y, m);
+		fe_cmov(r->Z, tab[i].Z, m);
+		fe_cmov(r->T, tab[i].T, m);
+	}
+}
+
+/* Fill GE_BTAB.  Called from ge_init, after GE_B exists. */
+static void ge_btab_init(void)
+{
+	struct ge m = GE_B;		/* [16^i]B as i walks up */
+	int i, d;
+
+	for (i = 0; i < GE_WINDOWS; i++) {
+		ge_identity(&GE_BTAB[i][0]);
+		GE_BTAB[i][1] = m;
+		for (d = 2; d < GE_WDIG; d++)
+			ge_add(&GE_BTAB[i][d], &GE_BTAB[i][d - 1], &m);
+		for (d = 0; d < GE_W; d++)
+			ge_add(&m, &m, &m);
+	}
+}
+
+/* r = s*B, s little-endian over the full 256 bits, no reduction -- the
+ * same contract ge_scalarmult has, so the two are comparable on every
+ * input including s >= L.
+ *
+ * Window i is hex digit i of s: byte i/2, low nibble first, which is the
+ * little-endian order the scalar is already in. */
+static void ge_basemult(struct ge *r, const unsigned char s[32])
+{
+	struct ge acc, t;
+	int i;
+
+	ge_identity(&acc);
+	for (i = 0; i < GE_WINDOWS; i++) {
+		unsigned digit = (s[i >> 1] >> ((i & 1) * GE_W)) & (GE_WDIG - 1);
+		ge_wselect(&t, GE_BTAB[i], digit);
+		ge_add(&acc, &acc, &t);
 	}
 	*r = acc;
 }
@@ -803,6 +928,7 @@ static void ge_init(void)
 		ge_identity(&GE_B);
 		ge_ready = 0;
 	}
+	ge_btab_init();		/* needs GE_B, so last */
 }
 
 /* ===================================================================== *
@@ -865,7 +991,7 @@ void ed25519_keygen(const unsigned char seed[32], unsigned char pk[32])
 
 	ge_init();
 	sc_expand(seed, a, prefix);
-	ge_scalarmult(&A, a, &GE_B);
+	ge_basemult(&A, a);
 	ge_tobytes(pk, &A);
 }
 
@@ -878,7 +1004,7 @@ void ed25519_sign(unsigned char sig[64], const void *msg, size_t len,
 
 	ge_init();
 	sc_expand(seed, a, prefix);
-	ge_scalarmult(&A, a, &GE_B);
+	ge_basemult(&A, a);
 	ge_tobytes(pk, &A);
 
 	/* r = H(prefix || M) mod L, then R = r*B. */
@@ -887,7 +1013,7 @@ void ed25519_sign(unsigned char sig[64], const void *msg, size_t len,
 	sha512_update(&c, msg, len);
 	sha512_final(&c, h);
 	sc_reduce(r, h, 64);
-	ge_scalarmult(&R, r, &GE_B);
+	ge_basemult(&R, r);
 	ge_tobytes(sig, &R);
 
 	/* k = H(R || A || M) mod L.  A is in there so a signature cannot be
@@ -927,7 +1053,18 @@ int ed25519_verify(const unsigned char sig[64], const void *msg, size_t len,
 	sha512_final(&c, h);
 	sc_reduce(k, h, 64);
 
-	ge_scalarmult(&sB, sig + 32, &GE_B);
+	/* [S]B by the windowed table; [k]A by the double-and-add, because A
+	 * varies per call so a table for it would have to be built per call,
+	 * and nothing in verification is secret.
+	 *
+	 * shortcut: [k]A is 256 + popcount(k) additions where a width-4
+	 * window with a 15-entry table built per call would be about 335,
+	 * and a joint wNAF over S and k would do both multiplications at
+	 * once for roughly half of this.  `make bench` puts verification at
+	 * 394 us and nothing here needs it faster; the upgrade path is a
+	 * second scalarmult differenced against this one, the same order
+	 * item 08 used. */
+	ge_basemult(&sB, sig + 32);
 	ge_scalarmult(&kA, k, &A);
 	ge_add(&sum, &R, &kA);
 	ge_tobytes(lhs, &sB);
@@ -1211,6 +1348,14 @@ static void cmd_ge(int argc, char **argv)
 	const char *op = argv[1];
 
 	ge_init();
+	if (!strcmp(op, "adds") && argc == 3) {
+		/* `ge adds reset` -- print the ge_add count and zero it.  The
+		 * argument is there only so this op has the three tokens
+		 * docmd requires of a `ge` command. */
+		printf("%lu\n", ge_adds);
+		ge_adds = 0;
+		return;
+	}
 	if (!strcmp(op, "const") && argc == 3) {
 		if (!strcmp(argv[2], "d"))		fe_tobytes(rb, GE_D);
 		else if (!strcmp(argv[2], "d2"))	fe_tobytes(rb, GE_D2);
@@ -1243,6 +1388,21 @@ static void cmd_ge(int argc, char **argv)
 			return;
 		}
 		ge_scalarmult(&r, qb, &GE_B);
+		ge_tobytes(rb, &r);
+		puthex(rb, 32);
+		putchar('\n');
+		return;
+	}
+	if (!strcmp(op, "wbasemul") && argc == 3) {
+		/* The same product by the windowed table.  Deliberately a
+		 * SEPARATE op from basemul, which keeps the double-and-add,
+		 * so the harness can run both on the same scalar in the same
+		 * process and difference them. */
+		if (!arg32(argv[2], qb)) {
+			puts("ERR hex");
+			return;
+		}
+		ge_basemult(&r, qb);
 		ge_tobytes(rb, &r);
 		puthex(rb, 32);
 		putchar('\n');

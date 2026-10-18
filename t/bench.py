@@ -98,7 +98,11 @@ def main():
     print()
     print("Which is the answer to PLAN item 07.  Replacing the long-division")
     print("reduction with a fast one can save at most the second number, and")
-    print("a windowed scalar multiplication goes after the first.")
+    print("a windowed scalar multiplication goes after the first -- which is")
+    print("PLAN item 08, now done: [s]B is a table lookup and 64 group")
+    print("additions, so the two multiplications in a signature cost what one")
+    print("used to and the second number is a BIGGER share of a smaller")
+    print("total.  Still the same decision: 49 us for a page of constants.")
     return 0
 
 

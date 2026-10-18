@@ -50,6 +50,11 @@ printf -- '\n--- oracle: an independent Ed25519 group in Python (40 lines,\n'
 printf -- '    RFC 8032 5.1.3 and 5.1.4, no limbs and no shared code)\n'
 run "diff.py ge" python3 t/diff.py "$E" ge
 
+printf -- '\n--- oracle: the EXISTING double-and-add, for the windowed [s]B\n'
+printf -- '    that replaced it (PLAN 08), plus a group-addition count that\n'
+printf -- '    says which of the two actually ran\n'
+run "diff.py wmul" python3 t/diff.py "$E" wmul
+
 printf -- '\n--- oracle: an independent Ed25519 in Python, written from the\n'
 printf -- '    RFC 8032 algorithm rather than from its vectors\n'
 run "diff.py sign" python3 t/diff.py "$E" sign
@@ -68,6 +73,7 @@ printf -- '\n=== oracles\n'
 printf -- '  CPython hashlib               ran (no network needed)\n'
 printf -- '  Python integers mod p and L   ran (no network needed)\n'
 printf -- '  Python reference group        ran (no network needed)\n'
+printf -- '  The double-and-add [s]B       ran (no network needed)\n'
 printf -- '  An independent Ed25519        ran (no network needed)\n'
 printf -- '  edwards25519, the other form  ran (no network needed)\n'
 if [ -f scratch/wp_ed.json ]; then

@@ -6,11 +6,17 @@ Ed25519 (RFC 8032) and X25519 (RFC 7748) in one C11 file, built up from the
 field arithmetic, not wrapped around a library.
 
 **NOT PRODUCTION CRYPTO.** Not constant-time, no blinding, no side-channel
-hardening, no secret-memory wiping. The scalar multiplication branches on
-the bits of the private scalar, so anything that can measure how long a
-signature takes, or watch its cache footprint, can recover the key. This
-exists to be *correct* against the published vectors, and the README says so
-first.
+hardening, no secret-memory wiping. This exists to be *correct* against the
+published vectors, and the README says so first.
+
+One part of that got narrower in item 08 and the wording has to keep up.
+The multiplication by the base point no longer branches on the scalar and
+no longer indexes a table with it: it is 64 group additions whatever the
+scalar is, with a constant-time table select. What still runs on secrets
+and still branches is the scalar arithmetic, `sc_reduce` subtracting L
+when it fits and `sc_geq_l` returning early. So signing is not constant
+time, the claim above stands, and the one thing that CAN be said is said
+exactly and no wider.
 
 ```
 ed25519 fe  OP ...        field arithmetic mod 2^255-19
@@ -70,11 +76,15 @@ Ranked by how little of it we control.
 
 ## Non-goals
 
-Constant time. It is stated as a non-goal, not attempted badly: a
+Constant time. Still a non-goal, and still not attempted badly: a
 half-hardened implementation invites exactly the use this must not have.
-Making it constant-time would mean a different scalar multiplication, and
-the honest version of that claim needs a measurement harness this does not
-have.
+Item 08 did replace the scalar multiplication for the base point, and its
+table lookup is constant time because a windowed method with a secret
+table index is a cache-timing channel and shipping one would be worse than
+shipping the double-and-add. That is a property of one function, asserted
+from the code and from an operation count. The honest version of a
+whole-implementation claim still needs a measurement harness this does not
+have, and the scalar arithmetic still branches on secrets.
 
 Being a library anyone depends on. There is no stable ABI, no versioning,
 no install target.
@@ -308,18 +318,82 @@ harder to difference against Python.
             test run checks is worse than no clean. It now removes the
             binary and the logs and says what it kept.
 
-### Later
-
-- [ ] 08 a windowed scalar multiplication, against the double-and-add
+- [x] 08 a windowed scalar multiplication, against the double-and-add
       why: this is where the time is, and item 07 is the measurement that
            says so: 92% of a signature against the 4% a faster reduction
            could touch. A fixed-window method with a table of multiples of
            the base point is the usual approach. The double-and-add stays
            as its oracle, the only order in which the replacement
            is checkable.
-      note: only worth doing at all if something needs signing to be
-           faster than 466 us. Nothing here does, so this is queued rather
-           than next.
+      note: the item carried "only worth doing if something needs signing
+           faster than 466 us, and nothing here does". Still true. It was
+           done anyway because the constant-time question below is worth
+           more than the speed: the branching double-and-add was the single
+           reason the SECRET scalar had a data-dependent code path, and
+           this removes that one path while being honest that it does not
+           remove the others.
+      done: a fixed-base table, GE_BTAB[i][d] = [d * 16^i]B for 64 windows
+            of 4 bits, built at ge_init from 1152 group additions. [s]B is
+            then 64 additions and NO doublings, against the 256 + popcount
+            the double-and-add needs. keygen, sign and the [S]B half of
+            verify use it; [k]A in verify keeps the double-and-add, since
+            A varies per call and nothing in verification is secret.
+      done: THE TABLE LOOKUP IS CONSTANT TIME. ge_wselect reads all 16
+            entries of a window and selects arithmetically with a mask,
+            so no load address and no branch depends on the scalar. A
+            windowed method with `tab[digit]` written literally is a
+            cache-timing channel on the private key and is the usual way
+            this optimisation is got wrong.
+      note: THIS DOES NOT MAKE SIGNING CONSTANT TIME and the README says
+            so in the same breath as the claim. sc_reduce is long division
+            with a data-dependent subtract and sc_geq_l returns early, and
+            both run on secrets. There is no timing harness here, so even
+            the narrow claim is argued from the code plus an operation
+            count, not measured.
+      proves: 7 new checks. The windowed [s]B equals the double-and-add on
+            55 scalars including 0, 1, L, 2^255 and 2^256-1, and equals the
+            Python reference on the same 55 so the agreement is not two
+            implementations sharing one mistake. All 1024 table entries
+            [d*16^i]B are read individually, by multiplying by d*16^i, and
+            each agrees: a single wrong entry is named rather than averaged
+            away by random scalars. Wycheproof's 139 EDDSA and 518 XDH
+            vectors still agree, and the 81 sign and 200 verify cases
+            against the independent Python Ed25519 now run through the new
+            multiplication.
+      proves: WHICH CODE RAN, which is the whole hazard of this item. A
+            comparison of "both methods" passes perfectly if `ge wbasemul`
+            quietly calls the double-and-add. So ge_add counts its own
+            calls under ED25519_CLI and `ge adds reset` reports them: the
+            windowed path is 64 additions for every one of the 55 scalars
+            and the double-and-add is 256 + popcount(s), 256 to 512 over
+            the same set. keygen is 64 and sign is 128, which is how the
+            suite knows the SECRET scalar goes through the new path, and
+            verify is 64 + (256 + popcount(k)) + 1 exactly.
+      found: the invariant count is also the only machine-checked evidence
+            for the constant-time claim. It says the number of group
+            additions does not depend on the scalar. It says nothing about
+            cache lines, and the survivor below is exactly that gap.
+      found: 8 of 9 mutations RED. Nibble order reversed, the table
+            stepping by 8^i instead of 16^i, one window short, every window
+            built from B instead of [16^i]B, fe_cmov using AND where it
+            needs XOR, and the select mask off by one: 9 failures each.
+            And the two vacuity mutants, `ge wbasemul` wired to the
+            double-and-add and keygen reverted to it, fail 2 checks each
+            and ONLY the count checks -- every value-comparison in the
+            section passes under both, which is the point.
+      survived: replacing the 16-entry scan with `*r = tab[digit]`. It
+            computes the same function, so no differential oracle can see
+            it; it is a pure cache-timing defect and the suite has no
+            timing harness. Recorded rather than chased, because the
+            alternative is inventing a measurement this repo cannot
+            make honestly. Reading the code is the only check on it.
+      found: the benchmark's own conclusion moved. A signature is 200 us
+            now, not 503, and the scalar arithmetic that was 10.7% of it is
+            24.3% of the smaller total. Item 07's rejection still stands on
+            the absolute figure: 49 us for a page of unreadable constants.
+
+### Later
+
 - [ ] 09 Ed25519ph and Ed25519ctx
       why: RFC 8032 defines three variants and this implements one. The
            other two change only the dom2 prefix fed to the hash, so the

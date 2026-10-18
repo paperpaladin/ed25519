@@ -2,12 +2,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * NOT PRODUCTION CRYPTO.  This code is not constant-time, has no blinding,
- * no side-channel hardening and no secret-memory wiping.  The scalar
- * multiplication branches on the bits of the private scalar, so anything
- * that can measure how long ed25519_sign() takes, or watch its cache
- * footprint, can recover the private key.  Do not use it to protect
- * anything.  It exists to be *correct* against the published vectors.
- * See README.md, which says this first and at greater length.
+ * no side-channel hardening and no secret-memory wiping.  Do not use it to
+ * protect anything.  It exists to be *correct* against the published
+ * vectors.  See README.md, which says this first and at greater length.
+ *
+ * ed25519_sign() is not constant-time: sc_reduce subtracts L only when it
+ * fits and sc_geq_l returns on the first differing byte, both on secret
+ * values.  The multiplication by the base point is the one part that does
+ * not depend on the scalar -- 64 group additions and a table select that
+ * reads every entry -- and that narrow claim is argued from the code and
+ * an operation count, not from a timing measurement, because there is no
+ * timing harness here.
  */
 #ifndef ED25519_H
 #define ED25519_H

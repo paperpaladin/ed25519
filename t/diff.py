@@ -878,11 +878,127 @@ def sec_wycheproof_x(exe):
     ok(not bad, msg)
 
 
+# ---------------------------------------------------------------- wmul ---
+def sec_wmul(exe):
+    """The windowed base multiplication against the double-and-add.
+
+    PLAN item 08.  `ge wbasemul s` is the new path (a table of [d*16^i]B
+    and a constant-time select); `ge basemul s` is the old double-and-add,
+    unchanged, and it is the oracle here -- it is itself differenced
+    against the Python reference in sec_ge, so agreeing with it is
+    agreeing with Python one step removed, and the Python reference is run
+    directly on the shorter scalar list below as well.
+
+    The hazard this section is written around: comparing "both methods"
+    proves nothing if `ge wbasemul` is quietly the double-and-add too.  So
+    every claim is paired with a group-addition count, which is 64 for the
+    windowed path and 256 + popcount(s) for the double-and-add, and the
+    counts of keygen, sign and verify say which one the LIBRARY calls.
+    """
+    rnd = random.Random(808)
+    scalars = ([0, 1, 2, 8, 15, 16, 17, 255, 2**252, 2**255, 2**255 + 1,
+                L - 1, L, L + 1, 2**256 - 1]
+               + [rnd.randrange(2**256) for _ in range(40)])
+
+    # 1. Against the double-and-add AND against Python, same scalars.
+    cmds = []
+    for sc in scalars:
+        cmds.append("ge wbasemul " + leb(sc).hex())
+        cmds.append("ge basemul " + leb(sc).hex())
+    got = batch(exe, cmds)
+    bad = [i for i in range(0, len(cmds), 2) if got[i] != got[i + 1]]
+    msg = ("the windowed [s]B == the double-and-add [s]B on %d scalars, "
+           "including 0, 1, L, 2^255 and 2^256-1" % len(scalars))
+    if bad:
+        msg += " -- first bad: `%s` -> %s, double-and-add says %s" % (
+            cmds[bad[0]], got[bad[0]], got[bad[0] + 1])
+    ok(not bad, msg)
+
+    want = [ref_encode(ref_mul(sc, REF_B)).hex() for sc in scalars]
+    bad = [j for j, sc in enumerate(scalars) if got[2 * j] != want[j]]
+    msg = ("...and == the Python reference on the same %d, so the agreement "
+           "above is not two implementations sharing one mistake"
+           % len(scalars))
+    if bad:
+        msg += " -- first bad: s=%d -> %s, want %s" % (
+            scalars[bad[0]], got[2 * bad[0]], want[bad[0]])
+    ok(not bad, msg)
+
+    # 2. Every entry of every window, which random scalars do not cover:
+    #    s = d * 16^i reads table[i][d] and nothing else, so a single
+    #    wrong entry is named rather than averaged away.
+    cmds, pairs = [], []
+    for i in range(64):
+        for d in range(16):
+            sc = d * 16**i
+            cmds.append("ge wbasemul " + leb(sc).hex())
+            cmds.append("ge basemul " + leb(sc).hex())
+            pairs.append((i, d))
+    got = batch(exe, cmds)
+    bad = [j for j in range(len(pairs)) if got[2 * j] != got[2 * j + 1]]
+    msg = ("every one of the %d table entries [d*16^i]B agrees with the "
+           "double-and-add" % len(pairs))
+    if bad:
+        msg += " -- first bad: i=%d d=%d -> %s, want %s" % (
+            pairs[bad[0]][0], pairs[bad[0]][1],
+            got[2 * bad[0]], got[2 * bad[0] + 1])
+    ok(not bad, msg)
+
+    # 3. WHICH CODE RAN.  Without this the two checks above would pass
+    #    with ge_basemult deleted and `ge wbasemul` wired to the
+    #    double-and-add: one implementation compared with itself.
+    cmds = ["ge adds reset"]
+    for sc in scalars:
+        cmds += ["ge wbasemul " + leb(sc).hex(), "ge adds reset",
+                 "ge basemul " + leb(sc).hex(), "ge adds reset"]
+    got = batch(exe, cmds)
+    wn = [int(got[2 + 4 * j]) for j in range(len(scalars))]
+    dn = [int(got[4 + 4 * j]) for j in range(len(scalars))]
+    want_d = [256 + bin(sc).count("1") for sc in scalars]
+    ok(set(wn) == {64},
+       "the windowed path takes exactly 64 group additions for EVERY one "
+       "of the %d scalars, so it is not the double-and-add and its "
+       "operation count does not depend on the scalar: counts seen = %s"
+       % (len(scalars), sorted(set(wn))))
+    ok(dn == want_d and len(set(dn)) > 1,
+       "...while the double-and-add takes 256 + popcount(s), %d to %d over "
+       "the same scalars -- the two paths are distinguishable, and this is "
+       "what stops the comparison above testing one of them twice"
+       % (min(dn), max(dn)))
+
+    # 4. The library, not just the CLI op.  keygen is one [a]B and sign is
+    #    two, so 64 and 128 additions say the secret scalar now goes
+    #    through the windowed path; verify is one [S]B windowed plus one
+    #    [k]A by the double-and-add plus the single R + [k]A.
+    seed = bytes(range(32))
+    msgb = b"\x00"
+    pk = ref_keygen(seed)
+    sig = ref_sign(seed, msgb)
+    k = le(hashlib.sha512(sig[:32] + pk + msgb).digest()) % L
+    got = batch(exe, [
+        "ge adds reset",
+        "keygen " + seed.hex(), "ge adds reset",
+        "sign %s %s" % (seed.hex(), msgb.hex()), "ge adds reset",
+        "verify %s %s %s" % (pk.hex(), msgb.hex(), sig.hex()),
+        "ge adds reset"])
+    nkey, nsign, nver = int(got[2]), int(got[4]), int(got[6])
+    want_ver = 64 + (256 + bin(k).count("1")) + 1
+    ok((nkey, nsign) == (64, 128),
+       "keygen is 64 group additions and sign is 128, so the SECRET scalar "
+       "goes through the windowed path and never through the branching "
+       "double-and-add: got %d and %d" % (nkey, nsign))
+    ok(nver == want_ver,
+       "verify is 64 for the windowed [S]B plus %d for [k]A by "
+       "double-and-add plus 1 for R + [k]A = %d: got %d"
+       % (256 + bin(k).count("1"), want_ver, nver))
+
+
 SECTIONS = {
     "sha512": sec_sha512,
     "fe": sec_fe,
     "sc": sec_sc,
     "ge": sec_ge,
+    "wmul": sec_wmul,
     "sign": sec_sign,
     "wycheproof": sec_wycheproof,
     "x25519": sec_x25519,
